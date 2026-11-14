@@ -1,85 +1,184 @@
-name: Build Signed Release AAB
+name: Build Signed Release APK
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - my-releases
 
 permissions:
   contents: read
 
+concurrency:
+  group: mcqueenvpn-release-apk
+  cancel-in-progress: false
+
 jobs:
   build:
+    name: Build signed Android APK
     runs-on: ubuntu-latest
+    env:
+      RUST_TOOLCHAIN: stable
+      GO_VERSION: "1.26"
+      NDK_VERSION: "27.2.12479018"
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Set up Java 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Accept Android SDK licenses
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
       - name: Install Android SDK and NDK
         run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;36.0.0" \
-            "ndk;27.2.12479018"
+            "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Validate release signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          missing=()
+          [[ -n "$KEYSTORE_BASE64" ]] || missing+=(RELEASE_KEYSTORE_BASE64)
+          [[ -n "$STORE_PASSWORD" ]] || missing+=(RELEASE_STORE_PASSWORD)
+          [[ -n "$KEY_ALIAS" ]] || missing+=(RELEASE_KEY_ALIAS)
+          [[ -n "$KEY_PASSWORD" ]] || missing+=(RELEASE_KEY_PASSWORD)
+          if (( ${#missing[@]} )); then
+            printf '::error::Missing GitHub Actions secret(s): %s\n' "${missing[*]}"
+            exit 1
+          fi
 
       - name: Restore release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
         run: |
-          test -n "$KEYSTORE_BASE64"
-          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
           test -s "$RUNNER_TEMP/release.jks"
           echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
-      - name: Build native libraries
+      - name: Build hev SOCKS5 tunnel native libraries
         run: |
           chmod +x compile-hevtun.sh
           ./compile-hevtun.sh
 
-          mkdir -p app/libs
-          if [ -d libs ]; then
-            cp -R libs/. app/libs/
-          fi
+      - name: Build Aether native core
+        run: |
+          chmod +x compile-aether.sh
+          ./compile-aether.sh
 
-      - name: Build Release AAB
+      - name: Build Psiphon client
+        run: |
+          chmod +x compile-psiphon.sh
+          ./compile-psiphon.sh
+
+      - name: Build Tor pluggable transport
+        run: |
+          chmod +x compile-pt.sh
+          ./compile-pt.sh
+
+      - name: Stage native libraries
+        run: |
+          mkdir -p app/libs
+          for directory in libs libs-aether libs-psiphon libs-pt; do
+            if [[ -d "$directory" ]]; then
+              cp -R "$directory"/. app/libs/
+            fi
+          done
+          find app/libs -type f -print | sort
+
+      - name: Resolve AndroidLibXrayLite release
+        id: xray
+        run: |
+          test -d AndroidLibXrayLite
+          tag="$(git -C AndroidLibXrayLite describe --tags --abbrev=0)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Using AndroidLibXrayLite tag: $tag"
+
+      - name: Download libv2ray AAR
+        uses: robinraju/release-downloader@v1.13
+        with:
+          repository: patterniha/AndroidLibXrayLite
+          tag: ${{ steps.xray.outputs.tag }}
+          fileName: libv2ray.aar
+          out-file-path: app/libs/
+
+      - name: Build signed Release APK
         env:
-          RELEASE_STORE_FILE: ${{ runner.temp }}/release.jks
+          RELEASE_STORE_FILE: ${{ env.RELEASE_STORE_FILE }}
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
-          gradle :app:bundleRelease
+          gradle --no-daemon :app:assembleRelease
 
-      - name: Verify AAB signature
+      - name: Verify APK signature and native payload
+        shell: bash
         run: |
-          AAB=$(find app/build/outputs/bundle/release -name "*.aab" | head -n 1)
-          test -n "$AAB"
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/*.apk)
+          if (( ${#apks[@]} != 1 )); then
+            echo "::error::Expected exactly one Release APK, found ${#apks[@]}"
+            printf '%s\n' "${apks[@]}"
+            exit 1
+          fi
 
-          jarsigner -verify "$AAB"
+          apk="${apks[0]}"
+          apksigner verify --verbose --print-certs "$apk"
 
-          keytool -printcert -jarfile "$AAB"
+          entries="$(unzip -Z1 "$apk")"
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            for library in libaether.so libpsiphon-tunnel-core.so liblyrebird.so; do
+              grep -Fqx "lib/$abi/$library" <<< "$entries" || {
+                echo "::error::APK is missing lib/$abi/$library"
+                exit 1
+              }
+            done
+          done
 
-      - name: Upload AAB
+          echo "Verified signed APK: $apk"
+          sha256sum "$apk" | tee "$RUNNER_TEMP/apk-sha256.txt"
+
+      - name: Upload signed Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: McQueenVPN-release-AAB
-          path: app/build/outputs/bundle/release/*.aab
+          name: McQueenVPN-release-apk
+          path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload APK checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: McQueenVPN-release-apk-sha256
+          path: ${{ runner.temp }}/apk-sha256.txt
+          if-no-files-found: error
+          retention-days: 30
