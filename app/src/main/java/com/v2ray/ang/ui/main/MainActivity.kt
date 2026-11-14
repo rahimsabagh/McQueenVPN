@@ -14,6 +14,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.v2ray.ang.core.LauncherManager
 import com.v2ray.ang.enums.PermissionType
 import com.v2ray.ang.handler.SettingsManager
+import com.v2ray.ang.mcqueen.McQueenManifestUpdater
 import com.v2ray.ang.ui.base.HelperBaseComponentActivity
 
 class MainActivity : HelperBaseComponentActivity() {
@@ -35,6 +36,7 @@ class MainActivity : HelperBaseComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestNotificationPermissionIfNeeded()
+        McQueenManifestUpdater.sync(this)
     }
 
     override fun onStart() {

@@ -58,6 +58,7 @@ object RemoteServerManifestParser {
         json: String,
         isAetherSupported: Boolean,
         subscriptionId: String = AppConfig.MCQUEEN_SUBSCRIPTION_ID,
+        verifyOutbound: (ProfileItem) -> Boolean = { true },
     ): ManifestParseResult {
         if (json.isBlank()) {
             throw IllegalArgumentException("Empty server manifest")
@@ -87,6 +88,7 @@ object RemoteServerManifestParser {
                 entry = entry,
                 isAetherSupported = isAetherSupported,
                 subscriptionId = subscriptionId,
+                verifyOutbound = verifyOutbound,
             )
             if (validated != null) {
                 validatedServers.add(validated)
@@ -123,6 +125,7 @@ object RemoteServerManifestParser {
         entry: RemoteServerEntryDto?,
         isAetherSupported: Boolean,
         subscriptionId: String = AppConfig.MCQUEEN_SUBSCRIPTION_ID,
+        verifyOutbound: (ProfileItem) -> Boolean = { true },
     ): ValidatedServer? {
         if (entry == null) return null
         if (entry.enabled != true) return null
@@ -146,7 +149,7 @@ object RemoteServerManifestParser {
 
         TlsSettingsCheck.fixImportedAlpn(profile)
 
-        if (!isProfileUsable(profile)) {
+        if (!isProfileUsable(profile) || !verifyOutbound(profile)) {
             return null
         }
 
@@ -179,27 +182,60 @@ object RemoteServerManifestParser {
         if (!LauncherManager.hasUsableServer(profile)) {
             return false
         }
+        val host = profile.server?.trim().orEmpty()
+        val port = profile.serverPort?.trim()?.toIntOrNull()
+
         return when (profile.configType) {
-            EConfigType.AETHER -> true
+            EConfigType.AETHER -> {
+                runCatching { com.v2ray.ang.core.AetherCore.of(profile) }.isSuccess
+            }
             EConfigType.VLESS,
             EConfigType.VMESS,
             EConfigType.TROJAN -> {
-                val hostValid = !profile.server.isNullOrBlank() &&
-                    (Utils.isPureIpAddress(profile.server.orEmpty()) || Utils.isValidUrl(profile.server))
-                val port = profile.serverPort?.toIntOrNull()
+                val hostValid = host.isNotEmpty() &&
+                    (Utils.isPureIpAddress(host) || Utils.isValidUrl(host))
                 val credValid = !profile.password.isNullOrBlank()
-                hostValid && port != null && port in 1..65535 && credValid
+                val realityValid = !profile.security.equals(AppConfig.REALITY, ignoreCase = true) ||
+                    !profile.publicKey.isNullOrBlank()
+                hostValid && port != null && port in 1..65535 && credValid && realityValid
             }
             EConfigType.SHADOWSOCKS -> {
-                val hostValid = !profile.server.isNullOrBlank()
-                val port = profile.serverPort?.toIntOrNull()
-                hostValid && port != null && port in 1..65535 && !profile.method.isNullOrBlank()
+                val hostValid = host.isNotEmpty() &&
+                    (Utils.isPureIpAddress(host) || Utils.isValidUrl(host))
+                hostValid &&
+                    port != null &&
+                    port in 1..65535 &&
+                    !profile.method.isNullOrBlank() &&
+                    !profile.password.isNullOrBlank()
             }
-            else -> {
-                val hostValid = !profile.server.isNullOrBlank()
-                val port = profile.serverPort?.toIntOrNull()
-                hostValid && (port == null || port in 1..65535)
+            EConfigType.HYSTERIA2 -> {
+                val hostValid = host.isNotEmpty() &&
+                    (Utils.isPureIpAddress(host) || Utils.isValidUrl(host))
+                hostValid && port != null && port in 1..65535 && !profile.password.isNullOrBlank()
             }
+            EConfigType.SOCKS -> {
+                val hostValid = host.isNotEmpty() &&
+                    (Utils.isPureIpAddress(host) || Utils.isValidUrl(host))
+                hostValid && port != null && port in 1..65535
+            }
+            EConfigType.WIREGUARD -> {
+                val hostValid = host.isNotEmpty() &&
+                    (Utils.isPureIpAddress(host) || Utils.isValidUrl(host))
+                val keysValid = !profile.secretKey.isNullOrBlank() && !profile.publicKey.isNullOrBlank()
+                val reservedValid = profile.reserved.isNullOrBlank() ||
+                    profile.reserved.orEmpty().split(",").filter { it.isNotBlank() }.all { it.trim().toIntOrNull() != null }
+                hostValid && port != null && port in 1..65535 && keysValid && reservedValid
+            }
+            EConfigType.MASQUE -> {
+                val hostValid = host.isNotEmpty() &&
+                    (Utils.isPureIpAddress(host) || Utils.isValidUrl(host))
+                val headersValid = profile.headers.isNullOrBlank() || runCatching {
+                    val obj = JsonParser.parseString(profile.headers.orEmpty()).asJsonObject
+                    obj.entrySet().all { it.value.isJsonPrimitive && it.value.asJsonPrimitive.isString }
+                }.getOrDefault(false)
+                hostValid && port != null && port in 1..65535 && headersValid
+            }
+            else -> false
         }
     }
 

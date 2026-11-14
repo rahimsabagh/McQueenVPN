@@ -60,7 +60,10 @@ class TProxyService(
                 writeText(configContent)
             }
 //            LogUtil.i(AppConfig.TAG, "Config file created: ${configFile.absolutePath}")
-            LogUtil.d(AppConfig.TAG, "HevSocks5Tunnel Config content:\n$configContent")
+            LogUtil.d(
+                AppConfig.TAG,
+                "HevSocks5Tunnel Config created (mtu=${SettingsManager.getVpnMtu()}, ipv6=${MmkvManager.decodeSettingsBool(AppConfig.PREF_IPV6_ENABLED, AppConfig.DEFAULT_IPV6_ENABLED)})"
+            )
 
 //            LogUtil.i(AppConfig.TAG, "TProxyStartService...")
             // False when the native thread could not be created, or when one is still running.

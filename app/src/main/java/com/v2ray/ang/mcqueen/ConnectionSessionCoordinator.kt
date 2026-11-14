@@ -25,6 +25,10 @@ class ConnectionSessionCoordinator {
     private var currentIndex: Int = -1
     private var state: VpnConnectionState = VpnConnectionState.DISCONNECTED
     private var lastFailureReason: String? = null
+    private var hasConnectedInSession: Boolean = false
+    private var recoveryEpisodesUsed: Int = 0
+    private var recoveryRemaining: Int = 0
+    private var totalAttemptsInSession: Int = 0
 
     fun currentState(): VpnConnectionState = state
 
@@ -34,6 +38,10 @@ class ConnectionSessionCoordinator {
         candidateQueue = candidateGuids
         currentIndex = if (candidateGuids.isNotEmpty()) 0 else -1
         lastFailureReason = null
+        hasConnectedInSession = false
+        recoveryEpisodesUsed = 0
+        recoveryRemaining = 0
+        totalAttemptsInSession = if (candidateGuids.isNotEmpty()) 1 else 0
         state = if (candidateGuids.isNotEmpty()) {
             VpnConnectionState.CONNECTING
         } else {
@@ -43,7 +51,11 @@ class ConnectionSessionCoordinator {
     }
 
     fun onConnectingBroadcast(): VpnConnectionState {
-        state = if (currentIndex > 0) {
+        if (state == VpnConnectionState.DISCONNECTED || state == VpnConnectionState.FAILED) {
+            state = VpnConnectionState.CONNECTING
+            return state
+        }
+        state = if (currentIndex > 0 || hasConnectedInSession || recoveryRemaining > 0) {
             VpnConnectionState.RECONNECTING
         } else {
             VpnConnectionState.CONNECTING
@@ -52,8 +64,8 @@ class ConnectionSessionCoordinator {
     }
 
     fun onStartSuccess(): VpnConnectionState {
-        candidateQueue = emptyList()
-        currentIndex = -1
+        hasConnectedInSession = true
+        recoveryRemaining = 0
         lastFailureReason = null
         state = VpnConnectionState.CONNECTED
         return state
@@ -72,28 +84,65 @@ class ConnectionSessionCoordinator {
         if (cleanReason != null) {
             lastFailureReason = cleanReason
         }
+
+        if (state == VpnConnectionState.DISCONNECTED || candidateQueue.isEmpty()) {
+            return exhaustFailure()
+        }
+
+        val sessionCap = maxAttemptsForSession(candidateQueue.size)
+        if (totalAttemptsInSession >= sessionCap) {
+            return exhaustFailure()
+        }
+
+        // Unexpected failure on an already-established tunnel initiates a strictly bounded recovery pass.
+        if (state == VpnConnectionState.CONNECTED || hasConnectedInSession) {
+            if (state == VpnConnectionState.CONNECTED) {
+                if (recoveryEpisodesUsed >= MAX_RECOVERY_EPISODES) {
+                    return exhaustFailure()
+                }
+                recoveryEpisodesUsed++
+                recoveryRemaining = minOf(
+                    maxOf(candidateQueue.size, 1),
+                    MAX_RECOVERY_ATTEMPTS_PER_DROP,
+                    sessionCap - totalAttemptsInSession,
+                )
+            }
+
+            if (recoveryRemaining > 0) {
+                recoveryRemaining--
+                totalAttemptsInSession++
+                currentIndex = if (currentIndex in candidateQueue.indices) {
+                    (currentIndex + 1) % candidateQueue.size
+                } else {
+                    0
+                }
+                state = VpnConnectionState.RECONNECTING
+                return FailoverDecision.RetryNext(
+                    guid = candidateQueue[currentIndex],
+                    attemptNumber = totalAttemptsInSession,
+                    totalAttempts = minOf(candidateQueue.size + recoveryRemaining, sessionCap),
+                )
+            }
+            return exhaustFailure()
+        }
+
         val nextIndex = currentIndex + 1
-        return if (candidateQueue.isNotEmpty() && nextIndex in candidateQueue.indices) {
+        return if (nextIndex in candidateQueue.indices) {
             currentIndex = nextIndex
+            totalAttemptsInSession++
             state = VpnConnectionState.RECONNECTING
             FailoverDecision.RetryNext(
                 guid = candidateQueue[nextIndex],
-                attemptNumber = nextIndex + 1,
-                totalAttempts = candidateQueue.size,
+                attemptNumber = totalAttemptsInSession,
+                totalAttempts = minOf(candidateQueue.size, sessionCap),
             )
         } else {
-            candidateQueue = emptyList()
-            currentIndex = -1
-            state = VpnConnectionState.FAILED
-            FailoverDecision.Exhausted(lastFailureReason)
+            exhaustFailure()
         }
     }
 
     fun onUserDisconnect(): VpnConnectionState {
-        candidateQueue = emptyList()
-        currentIndex = -1
-        lastFailureReason = null
-        state = VpnConnectionState.DISCONNECTED
+        resetSession(targetState = VpnConnectionState.DISCONNECTED, clearReason = true)
         return state
     }
 
@@ -105,13 +154,37 @@ class ConnectionSessionCoordinator {
         if (preserveFailure && state == VpnConnectionState.FAILED) {
             return state
         }
-        candidateQueue = emptyList()
-        currentIndex = -1
-        state = VpnConnectionState.DISCONNECTED
+        resetSession(targetState = VpnConnectionState.DISCONNECTED, clearReason = false)
         return state
     }
 
+    private fun exhaustFailure(): FailoverDecision.Exhausted {
+        val reason = lastFailureReason
+        resetSession(targetState = VpnConnectionState.FAILED, clearReason = false)
+        return FailoverDecision.Exhausted(reason)
+    }
+
+    private fun resetSession(targetState: VpnConnectionState, clearReason: Boolean) {
+        candidateQueue = emptyList()
+        currentIndex = -1
+        hasConnectedInSession = false
+        recoveryEpisodesUsed = 0
+        recoveryRemaining = 0
+        totalAttemptsInSession = 0
+        if (clearReason) {
+            lastFailureReason = null
+        }
+        state = targetState
+    }
+
     companion object {
+        internal const val MAX_TOTAL_SESSION_ATTEMPTS = 10
+        internal const val MAX_RECOVERY_EPISODES = 2
+        internal const val MAX_RECOVERY_ATTEMPTS_PER_DROP = 4
+
+        internal fun maxAttemptsForSession(candidateCount: Int): Int =
+            minOf(MAX_TOTAL_SESSION_ATTEMPTS, maxOf(candidateCount, 1) * 2)
+
         fun formatDuration(elapsedMs: Long): String {
             val totalSeconds = (elapsedMs / 1000L).coerceAtLeast(0L)
             val hours = totalSeconds / 3600L

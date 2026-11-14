@@ -190,7 +190,7 @@ object CoreServiceManager {
 
         LogUtil.i(AppConfig.TAG, "StartCore-Manager: Starting core loop for ${config.remarks}")
         val result = CoreConfigManager.getV2rayConfig(service, guid)
-        LogUtil.d(AppConfig.TAG, result.content)
+        LogUtil.d(AppConfig.TAG, "StartCore-Manager: Config generated status=${result.status}, type=${config.configType.name}, hasAether=${result.aetherCore != null}")
         if (!result.status) {
             if (result.localizedError) throw StartFailure(result.errorMessage)
             error(result.errorMessage.ifBlank { "Failed to get V2Ray config" })

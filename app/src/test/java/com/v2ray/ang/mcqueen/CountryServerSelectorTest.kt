@@ -3,7 +3,9 @@ package com.v2ray.ang.mcqueen
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.concurrent.atomic.AtomicInteger
 
 class CountryServerSelectorTest {
 
@@ -59,5 +61,29 @@ class CountryServerSelectorTest {
 
         assertEquals(listOf("guid-ok", "guid-timeout"), ranked.map { it.guid })
         assertEquals(-1L, ranked.last().latencyMs)
+    }
+
+    @Test
+    fun `enforces maxConcurrency bound across parallel candidate probes`() = runTest {
+        val candidates = (1..8).map { i ->
+            SelectableCandidate("guid-$i", "DE", "203.0.113.$i", 443)
+        }
+        val active = AtomicInteger(0)
+        val maxObserved = AtomicInteger(0)
+
+        val ranked = CountryServerSelector.rankCandidates(
+            candidates = candidates,
+            timeoutMs = 1000L,
+            maxConcurrency = 2,
+        ) { candidate ->
+            val nowActive = active.incrementAndGet()
+            maxObserved.updateAndGet { prev -> maxOf(prev, nowActive) }
+            delay(30L)
+            active.decrementAndGet()
+            40L + candidate.guid.substringAfter('-').toLong()
+        }
+
+        assertEquals(8, ranked.size)
+        assertTrue(maxObserved.get() <= 2, "Expected <= 2 concurrent probes, observed ${maxObserved.get()}")
     }
 }

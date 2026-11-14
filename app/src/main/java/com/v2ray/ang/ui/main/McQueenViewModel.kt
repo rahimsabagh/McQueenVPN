@@ -10,7 +10,9 @@ import androidx.lifecycle.viewModelScope
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
 import com.v2ray.ang.core.LauncherManager
+import com.v2ray.ang.dto.ConnectionTestResult
 import com.v2ray.ang.dto.TrafficStatsSnapshot
+import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.extension.serializable
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.SettingsManager
@@ -19,6 +21,8 @@ import com.v2ray.ang.mcqueen.ConnectionSessionCoordinator
 import com.v2ray.ang.mcqueen.CountryUiModel
 import com.v2ray.ang.mcqueen.FailoverDecision
 import com.v2ray.ang.mcqueen.ManifestSyncOutcome
+import com.v2ray.ang.mcqueen.McQueenManifestUpdater
+import com.v2ray.ang.mcqueen.McQueenServerConfig
 import com.v2ray.ang.mcqueen.McQueenServerRepository
 import com.v2ray.ang.mcqueen.VpnConnectionState
 import com.v2ray.ang.ui.base.BaseViewModel
@@ -33,6 +37,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 data class McQueenUiState(
     val connectionState: VpnConnectionState = VpnConnectionState.DISCONNECTED,
@@ -69,6 +74,10 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
     private var durationTickerJob: Job? = null
     private var failoverJob: Job? = null
     private var latencyJob: Job? = null
+    private var connectionTimeoutJob: Job? = null
+    private var verifyTunnelJob: Job? = null
+    private var pendingVerifyRequestId: String? = null
+    private var userRequestedDisconnect: Boolean = false
     private var receiverRegistered = false
 
     private val broadcastReceiver = object : BroadcastReceiver() {
@@ -82,7 +91,20 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
                 AppConfig.MSG_STATE_START_SUCCESS -> handleStartSuccess()
                 AppConfig.MSG_STATE_CONNECTING -> handleConnecting(intent.getStringExtra("content"))
                 AppConfig.MSG_STATE_START_FAILURE -> handleStartFailure(intent.getStringExtra("content"))
-                AppConfig.MSG_STATE_STOP_SUCCESS -> handleServiceStopped(preserveFailure = false)
+                AppConfig.MSG_STATE_STOP_SUCCESS -> {
+                    val shouldPreserveFailure = !userRequestedDisconnect
+                    userRequestedDisconnect = false
+                    handleServiceStopped(preserveFailure = shouldPreserveFailure)
+                }
+                AppConfig.MSG_MEASURE_DELAY_RESULT -> {
+                    val reqId = intent.getStringExtra(MessageHelper.EXTRA_REQUEST_ID)
+                    val result = intent.serializable<ConnectionTestResult>("content")
+                    handleMeasureDelayResult(reqId, result)
+                }
+                AppConfig.MSG_MEASURE_DELAY_CANCEL -> {
+                    val reqId = intent.getStringExtra(MessageHelper.EXTRA_REQUEST_ID)
+                    handleMeasureDelayCancelled(reqId)
+                }
                 AppConfig.MSG_TRAFFIC_STATS -> {
                     val snapshot = intent.serializable<TrafficStatsSnapshot>("content") ?: return
                     handleTrafficStats(snapshot)
@@ -110,7 +132,7 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
         }
         MessageHelper.sendMsg2ServiceForResult(app, AppConfig.MSG_REGISTER_CLIENT, "") { handled ->
             if (!handled && coordinator.currentState() == VpnConnectionState.CONNECTED) {
-                handleServiceStopped(preserveFailure = false)
+                handleServiceStopped(preserveFailure = true)
             }
         }
     }
@@ -160,7 +182,7 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
         if (currentCountries.isEmpty()) return
         latencyJob?.cancel()
         latencyJob = viewModelScope.launch {
-            val measured = repository.measureCountryLatencies(currentCountries)
+            val measured = repository.measureCountryLatencies(app, currentCountries)
             _uiState.update { state ->
                 val selectedCode = state.selectedCountry?.countryCode
                 val updatedSelected = selectedCode?.let { code ->
@@ -222,7 +244,7 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
     }
 
     fun onVpnPermissionDenied() {
-        failoverJob?.cancel()
+        cancelAttemptGuards()
         coordinator.onUserDisconnect()
         _uiState.update {
             it.copy(
@@ -234,7 +256,8 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
     }
 
     fun disconnect() {
-        failoverJob?.cancel()
+        userRequestedDisconnect = true
+        cancelAttemptGuards()
         stopDurationTicker()
         coordinator.onUserDisconnect()
         LauncherManager.stopService(app)
@@ -275,6 +298,7 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
             return false
         }
         _uiState.update { it.copy(manifestUrl = repository.getConfiguredUrl()) }
+        McQueenManifestUpdater.sync(app, forceReschedule = true)
         syncCountries(showToast = true)
         return true
     }
@@ -282,11 +306,13 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
     fun resetManifestUrlAndSync() {
         repository.resetCustomUrl()
         _uiState.update { it.copy(manifestUrl = repository.getConfiguredUrl()) }
+        McQueenManifestUpdater.sync(app, forceReschedule = true)
         syncCountries(showToast = true)
     }
 
     private fun connectCountry(country: CountryUiModel, startVpnService: () -> Unit) {
-        failoverJob?.cancel()
+        userRequestedDisconnect = false
+        cancelAttemptGuards()
         persistSelectedCountry(country)
 
         _uiState.update {
@@ -299,7 +325,7 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
         }
 
         failoverJob = viewModelScope.launch {
-            val ranked = repository.selectCandidatesForCountry(country.countryCode)
+            val ranked = repository.selectCandidatesForCountry(app, country.countryCode)
             val firstGuid = coordinator.startAttempt(ranked.map { it.guid })
             if (firstGuid == null) {
                 _uiState.update {
@@ -311,11 +337,34 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
                 return@launch
             }
             MmkvManager.setSelectServer(firstGuid)
+            startAttemptTimeout(firstGuid)
             startVpnService()
         }
     }
 
+    private fun startAttemptTimeout(guid: String) {
+        connectionTimeoutJob?.cancel()
+        val isAether = MmkvManager.decodeServerConfig(guid)?.configType == EConfigType.AETHER
+        val timeoutMs = if (isAether) {
+            McQueenServerConfig.AETHER_CONNECT_ATTEMPT_TIMEOUT_MS
+        } else {
+            McQueenServerConfig.CONNECT_ATTEMPT_TIMEOUT_MS
+        }
+        connectionTimeoutJob = viewModelScope.launch {
+            delay(timeoutMs)
+            val currentState = coordinator.currentState()
+            if ((currentState == VpnConnectionState.CONNECTING || currentState == VpnConnectionState.RECONNECTING) &&
+                coordinator.currentGuid() == guid
+            ) {
+                LogUtil.w(AppConfig.TAG, "McQueenViewModel: attempt timeout after ${timeoutMs}ms for guid=$guid")
+                LauncherManager.stopService(app)
+                handleStartFailure(getString(R.string.mcqueen_connection_timeout))
+            }
+        }
+    }
+
     private fun handleServiceRunning() {
+        connectionTimeoutJob?.cancel()
         val nextState = coordinator.onServiceRunningQuery()
         _uiState.update {
             it.copy(
@@ -337,6 +386,69 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
 
     private fun handleStartSuccess() {
         failoverJob?.cancel()
+        connectionTimeoutJob?.cancel()
+        if (userRequestedDisconnect) return
+
+        // Verify end-to-end encrypted traffic over the newly started core before promoting UI to CONNECTED.
+        val requestId = UUID.randomUUID().toString()
+        pendingVerifyRequestId = requestId
+        _uiState.update {
+            it.copy(
+                statusDetail = getString(R.string.mcqueen_verifying_tunnel),
+            )
+        }
+
+        verifyTunnelJob?.cancel()
+        verifyTunnelJob = viewModelScope.launch {
+            delay(McQueenServerConfig.TUNNEL_VERIFY_TIMEOUT_MS)
+            if (pendingVerifyRequestId == requestId) {
+                pendingVerifyRequestId = null
+                LogUtil.w(AppConfig.TAG, "McQueenViewModel: post-connect tunnel verification timed out")
+                LauncherManager.stopService(app)
+                handleStartFailure(getString(R.string.mcqueen_tunnel_check_failed))
+            }
+        }
+
+        MessageHelper.sendMsg2ServiceForResult(app, AppConfig.MSG_MEASURE_DELAY, requestId) { handled ->
+            if (!handled && pendingVerifyRequestId == requestId) {
+                pendingVerifyRequestId = null
+                verifyTunnelJob?.cancel()
+                handleStartFailure(getString(R.string.mcqueen_tunnel_check_failed))
+            }
+        }
+    }
+
+    private fun handleMeasureDelayResult(requestId: String?, result: ConnectionTestResult?) {
+        val activeRequestId = pendingVerifyRequestId ?: return
+        if (requestId != activeRequestId) return
+
+        pendingVerifyRequestId = null
+        verifyTunnelJob?.cancel()
+
+        if (result != null && result.delayMillis >= 0L) {
+            promoteToConnected()
+        } else {
+            val reason = result?.errorMessage?.takeIf { it.isNotBlank() }
+                ?: getString(R.string.mcqueen_tunnel_check_failed)
+            LogUtil.w(AppConfig.TAG, "McQueenViewModel: post-connect tunnel verification failed: $reason")
+            LauncherManager.stopService(app)
+            handleStartFailure(reason)
+        }
+    }
+
+    private fun handleMeasureDelayCancelled(requestId: String?) {
+        val activeRequestId = pendingVerifyRequestId ?: return
+        if (requestId != activeRequestId) return
+
+        pendingVerifyRequestId = null
+        verifyTunnelJob?.cancel()
+        if (!userRequestedDisconnect) {
+            LauncherManager.stopService(app)
+            handleStartFailure(getString(R.string.mcqueen_tunnel_check_failed))
+        }
+    }
+
+    private fun promoteToConnected() {
         val nextState = coordinator.onStartSuccess()
         val now = System.currentTimeMillis()
         val effectiveStart = _uiState.value.sessionStartMs.takeIf { it > 0L } ?: now
@@ -351,7 +463,12 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
     }
 
     private fun handleStartFailure(reason: String?) {
+        if (userRequestedDisconnect) return
+        connectionTimeoutJob?.cancel()
+        verifyTunnelJob?.cancel()
+        pendingVerifyRequestId = null
         stopDurationTicker()
+
         when (val decision = coordinator.onStartFailure(reason)) {
             is FailoverDecision.RetryNext -> {
                 val countryName = _uiState.value.selectedCountry?.countryName.orEmpty()
@@ -367,8 +484,9 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
                 }
                 failoverJob?.cancel()
                 failoverJob = viewModelScope.launch {
-                    delay(350L)
+                    delay(450L)
                     MmkvManager.setSelectServer(decision.guid)
+                    startAttemptTimeout(decision.guid)
                     val callback = startVpnCallback
                     if (callback != null) {
                         callback()
@@ -402,6 +520,9 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
         if (nextState == VpnConnectionState.RECONNECTING) {
             return
         }
+        connectionTimeoutJob?.cancel()
+        verifyTunnelJob?.cancel()
+        pendingVerifyRequestId = null
         stopDurationTicker()
         _uiState.update {
             it.copy(
@@ -454,6 +575,13 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
         durationTickerJob = null
     }
 
+    private fun cancelAttemptGuards() {
+        failoverJob?.cancel()
+        connectionTimeoutJob?.cancel()
+        verifyTunnelJob?.cancel()
+        pendingVerifyRequestId = null
+    }
+
     private fun applyCountries(countries: List<CountryUiModel>, updatedAt: String?) {
         val savedCode = MmkvManager.decodeSettingsString(KEY_SELECTED_COUNTRY_CODE).orEmpty()
         val savedName = MmkvManager.decodeSettingsString(AppConfig.PREF_MCQUEEN_SELECTED_COUNTRY).orEmpty()
@@ -491,7 +619,7 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         stopDurationTicker()
-        failoverJob?.cancel()
+        cancelAttemptGuards()
         latencyJob?.cancel()
         stopListenBroadcast()
     }

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "updated_at": "2026-11-14T00:00:00Z",
+  "servers": [
+    {
+      "id": "de-sample-01",
+      "country": "Germany",
+      "country_code": "DE",
+      "config": "vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443?encryption=none&security=tls&sni=example.invalid&type=ws&path=%2Fws#DE-Sample-01",
+      "enabled": false
+    },
+    {
+      "id": "nl-sample-01",
+      "country": "Netherlands",
+      "country_code": "NL",
+      "config": "trojan://SAMPLE_PASSWORD_REPLACE_ME@198.51.100.20:443?security=tls&sni=example.invalid#NL-Sample-01",
+      "enabled": false
+    },
+    {
+      "id": "us-sample-01",
+      "country": "United States",
+      "country_code": "US",
+      "config": "hysteria2://SAMPLE_PASSWORD_REPLACE_ME@192.0.2.30:443/?sni=example.invalid#US-Sample-01",
+      "enabled": false
+    }
+  ]
+}

@@ -12,7 +12,19 @@ import org.junit.jupiter.api.Test
 class McQueenServerConfigAndMockFetchTest {
 
     @Test
-    fun `validates https urls and loopback urls while rejecting insecure remote http`() {
+    fun `validates https urls, migrates legacy main branch url, and rejects insecure remote http`() {
+        assertEquals(
+            "https://raw.githubusercontent.com/rahimsabagh/McQueenVPN/my-releases/servers.json",
+            McQueenServerConfig.DEFAULT_SERVERS_URL,
+        )
+        assertEquals(
+            McQueenServerConfig.DEFAULT_SERVERS_URL,
+            McQueenServerConfig.resolveActiveUrl(McQueenServerConfig.LEGACY_DEFAULT_SERVERS_URL),
+        )
+        assertEquals(
+            McQueenServerConfig.DEFAULT_SERVERS_URL,
+            McQueenServerConfig.resolveActiveUrl("http://example.com/servers.json"),
+        )
         assertTrue(McQueenServerConfig.isValidManifestUrl(McQueenServerConfig.DEFAULT_SERVERS_URL))
         assertTrue(McQueenServerConfig.isValidManifestUrl("https://example.com/vpn/servers.json"))
         assertTrue(McQueenServerConfig.isValidManifestUrl("http://127.0.0.1:8080/servers.json"))
@@ -61,6 +73,31 @@ class McQueenServerConfigAndMockFetchTest {
             val parsed = RemoteServerManifestParser.parse(body, isAetherSupported = true)
             assertEquals(2, parsed.countries.size)
             assertEquals(listOf("DE", "NL"), parsed.countries.map { it.countryCode })
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun `defaultHttpClient blocks redirect to non-https remote url`() {
+        val server = MockWebServer()
+        server.start()
+        try {
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(302)
+                    .addHeader("Location", "http://insecure.example.invalid/servers.json")
+                    .build()
+            )
+            val client = McQueenServerRepository.defaultHttpClient()
+            val url = server.url("/servers.json").toString()
+            var blocked = false
+            try {
+                client.newCall(Request.Builder().url(url).build()).execute().close()
+            } catch (_: java.io.IOException) {
+                blocked = true
+            }
+            assertTrue(blocked, "Expected redirect to remote HTTP URL to be blocked")
         } finally {
             server.close()
         }

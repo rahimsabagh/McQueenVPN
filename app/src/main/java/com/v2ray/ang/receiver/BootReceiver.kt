@@ -3,11 +3,14 @@ package com.v2ray.ang.receiver
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.VpnService
 import android.os.UserManager
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.core.LauncherManager
 import com.v2ray.ang.handler.MmkvManager
+import com.v2ray.ang.handler.SettingsManager
 import com.v2ray.ang.handler.SubscriptionUpdater
+import com.v2ray.ang.mcqueen.McQueenManifestUpdater
 import com.v2ray.ang.util.LogUtil
 
 class BootReceiver : BroadcastReceiver() {
@@ -45,6 +48,10 @@ class BootReceiver : BroadcastReceiver() {
             }
         }
 
+        // Re-schedule background manifest & subscription updates even if auto-connect on boot is off.
+        McQueenManifestUpdater.sync(context)
+        SubscriptionUpdater.sync(context)
+
         if (!MmkvManager.decodeStartOnBoot()) {
             LogUtil.i(AppConfig.TAG, "BootReceiver: Auto-start on boot is disabled")
             return
@@ -55,8 +62,12 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
+        if (SettingsManager.isVpnMode() && VpnService.prepare(context) != null) {
+            LogUtil.w(AppConfig.TAG, "BootReceiver: VPN permission not granted, skipping boot auto-start")
+            return
+        }
+
         LogUtil.i(AppConfig.TAG, "BootReceiver: Starting V2Ray service")
         LauncherManager.startService(context)
-        SubscriptionUpdater.sync(context)
     }
 }

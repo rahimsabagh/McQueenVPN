@@ -867,5 +867,8 @@
     <string name="mcqueen_settings_manifest_invalid">Please enter a valid HTTPS URL</string>
     <string name="mcqueen_settings_last_updated">Updated %1$s</string>
     <string name="mcqueen_settings_licenses">Open-source licenses</string>
+    <string name="mcqueen_verifying_tunnel">Verifying encrypted tunnel…</string>
+    <string name="mcqueen_connection_timeout">Connection timed out</string>
+    <string name="mcqueen_tunnel_check_failed">Tunnel handshake succeeded but traffic check failed</string>
 
 </resources>

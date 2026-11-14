@@ -3,6 +3,8 @@ package com.v2ray.ang.mcqueen
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 
 data class SelectableCandidate(
@@ -15,25 +17,29 @@ data class SelectableCandidate(
 object CountryServerSelector {
 
     /**
-     * Measures reachability for [candidates] in parallel and orders them by lowest latency.
+     * Measures reachability for [candidates] with bounded parallelism and orders them by lowest latency.
      * Responsive nodes (`latencyMs > 0`) are ranked ahead of timed-out/unresponsive ones (`latencyMs <= 0`),
      * while preserving unreachable candidates at the tail so VPN failover can still attempt them if
-     * TCP probing was blocked independently of transport traffic.
+     * probing was blocked independently of transport traffic.
      */
     suspend fun rankCandidates(
         candidates: List<SelectableCandidate>,
         timeoutMs: Long = McQueenServerConfig.PROBE_TIMEOUT_MS.toLong(),
+        maxConcurrency: Int = McQueenServerConfig.MAX_CONCURRENT_PROBES,
         probe: suspend (SelectableCandidate) -> Long,
     ): List<CandidateLatency> {
         if (candidates.isEmpty()) return emptyList()
 
+        val semaphore = Semaphore(maxConcurrency.coerceAtLeast(1))
         val measured = coroutineScope {
             candidates.mapIndexed { index, candidate ->
                 async {
-                    val rawLatency = withTimeoutOrNull(timeoutMs) {
-                        runCatching { probe(candidate) }.getOrDefault(-1L)
-                    } ?: -1L
-                    index to CandidateLatency(guid = candidate.guid, latencyMs = rawLatency)
+                    semaphore.withPermit {
+                        val rawLatency = withTimeoutOrNull(timeoutMs) {
+                            runCatching { probe(candidate) }.getOrDefault(-1L)
+                        } ?: -1L
+                        index to CandidateLatency(guid = candidate.guid, latencyMs = rawLatency)
+                    }
                 }
             }.awaitAll()
         }

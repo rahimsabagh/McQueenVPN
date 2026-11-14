@@ -28,14 +28,15 @@ class ConnectionSessionCoordinatorTest {
 
         // Candidate 2 succeeds -> CONNECTED
         assertEquals(VpnConnectionState.CONNECTED, coordinator.onStartSuccess())
-        assertNull(coordinator.currentGuid())
+        assertEquals("srv-2", coordinator.currentGuid())
 
         // User disconnects -> DISCONNECTED
         assertEquals(VpnConnectionState.DISCONNECTED, coordinator.onUserDisconnect())
+        assertNull(coordinator.currentGuid())
     }
 
     @Test
-    fun `enters FAILED state once all candidates are exhausted`() {
+    fun `enters FAILED state once all candidates are exhausted and preserves FAILED across stop broadcast`() {
         val coordinator = ConnectionSessionCoordinator()
         coordinator.startAttempt(listOf("srv-1", "srv-2"))
 
@@ -48,8 +49,48 @@ class ConnectionSessionCoordinatorTest {
         assertEquals("all blocked", (exhausted as FailoverDecision.Exhausted).reason)
         assertEquals(VpnConnectionState.FAILED, coordinator.currentState())
 
-        // Stale not-running broadcast preserves FAILED state until user acts
+        // Trailing STOP_SUCCESS/NOT_RUNNING with preserveFailure=true must keep FAILED state
         assertEquals(VpnConnectionState.FAILED, coordinator.onServiceStopped(preserveFailure = true))
+    }
+
+    @Test
+    fun `recovers onto alternate server when established tunnel drops and enforces hard retry cap`() {
+        val coordinator = ConnectionSessionCoordinator()
+        coordinator.startAttempt(listOf("srv-1", "srv-2"))
+        assertEquals(VpnConnectionState.CONNECTED, coordinator.onStartSuccess())
+
+        // Established tunnel unexpectedly fails -> fail over to srv-2
+        val recovery1 = coordinator.onStartFailure("aether exited")
+        assertTrue(recovery1 is FailoverDecision.RetryNext)
+        assertEquals("srv-2", (recovery1 as FailoverDecision.RetryNext).guid)
+        assertEquals(VpnConnectionState.RECONNECTING, coordinator.currentState())
+
+        // srv-2 connects, then later drops again -> second recovery episode allowed within session cap
+        assertEquals(VpnConnectionState.CONNECTED, coordinator.onStartSuccess())
+        val recovery2 = coordinator.onStartFailure("reload failed")
+        assertTrue(recovery2 is FailoverDecision.RetryNext)
+        assertEquals("srv-1", (recovery2 as FailoverDecision.RetryNext).guid)
+
+        // Attempt 4 tries remaining candidate srv-2 before hitting session cap (max 4 for 2 servers)
+        val recovery3 = coordinator.onStartFailure("srv-1 down")
+        assertTrue(recovery3 is FailoverDecision.RetryNext)
+        assertEquals("srv-2", (recovery3 as FailoverDecision.RetryNext).guid)
+
+        // Further failure hits hard retry cap without infinite retry loop
+        val finalFailure = coordinator.onStartFailure("still broken")
+        assertTrue(finalFailure is FailoverDecision.Exhausted)
+        assertEquals(VpnConnectionState.FAILED, coordinator.currentState())
+    }
+
+    @Test
+    fun `ignores failure broadcast after explicit user disconnect`() {
+        val coordinator = ConnectionSessionCoordinator()
+        coordinator.startAttempt(listOf("srv-1", "srv-2"))
+        assertEquals(VpnConnectionState.DISCONNECTED, coordinator.onUserDisconnect())
+
+        val decision = coordinator.onStartFailure("late failure")
+        assertTrue(decision is FailoverDecision.Exhausted)
+        assertEquals(VpnConnectionState.FAILED, coordinator.currentState())
     }
 
     @Test
