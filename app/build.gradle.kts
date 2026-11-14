@@ -12,8 +12,8 @@ android {
         applicationId = "com.aistudio.mcqueenvpn.rmqvpn"
         minSdk = 29
         targetSdk = 36
-        versionCode = 760
-        versionName = "2.4.0"
+        versionCode = 761
+        versionName = "1.0.0-beta.1"
         buildConfigField("String", "DISTRIBUTION", "\"Play Store\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

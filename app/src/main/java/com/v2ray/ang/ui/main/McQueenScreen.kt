@@ -41,6 +41,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Description
@@ -101,6 +102,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -129,7 +132,7 @@ fun McQueenScreen(
     onSetThemeMode: (String) -> Unit,
     onSetAutoBoot: (Boolean) -> Unit,
     onSetBypassLan: (Boolean) -> Unit,
-    onSaveManifestUrl: (String) -> Boolean,
+    onSaveManifestUrl: (String, String, Boolean) -> Boolean,
     onResetManifestUrl: () -> Unit,
 ) {
     var showPreferences by remember { mutableStateOf(false) }
@@ -302,12 +305,13 @@ fun McQueenScreen(
                 autoBootEnabled = uiState.autoBootEnabled,
                 bypassLanEnabled = uiState.bypassLanEnabled,
                 manifestUrl = uiState.manifestUrl,
+                manifestHasAuthToken = uiState.manifestHasAuthToken,
                 manifestUpdatedAt = uiState.manifestUpdatedAt,
                 onSetThemeMode = onSetThemeMode,
                 onSetAutoBoot = onSetAutoBoot,
                 onSetBypassLan = onSetBypassLan,
-                onSaveManifestUrl = { url ->
-                    if (onSaveManifestUrl(url)) {
+                onSaveManifestUrl = { url, token, clearToken ->
+                    if (onSaveManifestUrl(url, token, clearToken)) {
                         showPreferences = false
                     }
                 },
@@ -332,6 +336,7 @@ fun McQueenScreen(
 private fun resolveStateAccentColor(state: VpnConnectionState, isDark: Boolean): Color {
     return when (state) {
         VpnConnectionState.DISCONNECTED -> if (isDark) McQueenSemanticColors.DisconnectedDark else McQueenSemanticColors.DisconnectedLight
+        VpnConnectionState.PREPARING,
         VpnConnectionState.CONNECTING -> McQueenSemanticColors.Connecting
         VpnConnectionState.CONNECTED -> McQueenSemanticColors.Connected
         VpnConnectionState.RECONNECTING -> McQueenSemanticColors.Reconnecting
@@ -346,7 +351,9 @@ private fun AmbientStatusBackdrop(
 ) {
     val alpha = when (connectionState) {
         VpnConnectionState.CONNECTED -> 0.16f
-        VpnConnectionState.CONNECTING, VpnConnectionState.RECONNECTING -> 0.14f
+        VpnConnectionState.PREPARING,
+        VpnConnectionState.CONNECTING,
+        VpnConnectionState.RECONNECTING -> 0.14f
         VpnConnectionState.FAILED -> 0.12f
         VpnConnectionState.DISCONNECTED -> 0.06f
     }
@@ -396,7 +403,7 @@ private fun McQueenTopBar(
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         ) {
             Image(
-                painter = painterResource(id = R.drawable.img_mcqueen_emblem),
+                painter = painterResource(id = R.drawable.img_mcqueen_mark),
                 contentDescription = stringResource(R.string.mcqueen_acc_emblem),
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
@@ -465,6 +472,7 @@ private fun ConnectionHeroSection(
 ) {
     val statusLabel = when (uiState.connectionState) {
         VpnConnectionState.DISCONNECTED -> stringResource(R.string.mcqueen_status_disconnected)
+        VpnConnectionState.PREPARING -> stringResource(R.string.mcqueen_status_preparing)
         VpnConnectionState.CONNECTING -> stringResource(R.string.mcqueen_status_connecting)
         VpnConnectionState.CONNECTED -> stringResource(R.string.mcqueen_status_connected)
         VpnConnectionState.RECONNECTING -> stringResource(R.string.mcqueen_status_reconnecting)
@@ -473,6 +481,7 @@ private fun ConnectionHeroSection(
 
     val statusHint = uiState.statusDetail?.takeIf { it.isNotBlank() } ?: when (uiState.connectionState) {
         VpnConnectionState.DISCONNECTED -> stringResource(R.string.mcqueen_status_hint_disconnected)
+        VpnConnectionState.PREPARING -> stringResource(R.string.mcqueen_status_hint_preparing)
         VpnConnectionState.CONNECTING -> stringResource(R.string.mcqueen_status_hint_connecting)
         VpnConnectionState.CONNECTED -> stringResource(R.string.mcqueen_status_hint_connected)
         VpnConnectionState.RECONNECTING -> stringResource(R.string.mcqueen_status_hint_reconnecting)
@@ -542,7 +551,9 @@ private fun StatusBadgePill(
 ) {
     val icon: ImageVector = when (state) {
         VpnConnectionState.CONNECTED -> Icons.Rounded.Shield
-        VpnConnectionState.CONNECTING, VpnConnectionState.RECONNECTING -> Icons.Rounded.Sync
+        VpnConnectionState.PREPARING,
+        VpnConnectionState.CONNECTING,
+        VpnConnectionState.RECONNECTING -> Icons.Rounded.Sync
         VpnConnectionState.FAILED -> Icons.Rounded.ErrorOutline
         VpnConnectionState.DISCONNECTED -> Icons.Rounded.PowerSettingsNew
     }
@@ -607,18 +618,22 @@ private fun PowerConnectOrbButton(
 
     val actionLabel = when (connectionState) {
         VpnConnectionState.CONNECTED -> stringResource(R.string.mcqueen_action_disconnect)
-        VpnConnectionState.CONNECTING, VpnConnectionState.RECONNECTING -> stringResource(R.string.mcqueen_action_cancel)
+        VpnConnectionState.PREPARING,
+        VpnConnectionState.CONNECTING,
+        VpnConnectionState.RECONNECTING -> stringResource(R.string.mcqueen_action_cancel)
         VpnConnectionState.FAILED -> stringResource(R.string.mcqueen_action_retry)
         VpnConnectionState.DISCONNECTED -> stringResource(R.string.mcqueen_action_connect)
     }
 
-    val isBusy = connectionState == VpnConnectionState.CONNECTING ||
+    val isBusy = connectionState == VpnConnectionState.PREPARING ||
+        connectionState == VpnConnectionState.CONNECTING ||
         connectionState == VpnConnectionState.RECONNECTING
     val isConnected = connectionState == VpnConnectionState.CONNECTED
 
     val buttonContainerColor = when (connectionState) {
         VpnConnectionState.CONNECTED -> McQueenSemanticColors.Connected
-        VpnConnectionState.CONNECTING -> MaterialTheme.colorScheme.surfaceContainerHigh
+        VpnConnectionState.PREPARING,
+        VpnConnectionState.CONNECTING,
         VpnConnectionState.RECONNECTING -> MaterialTheme.colorScheme.surfaceContainerHigh
         VpnConnectionState.FAILED -> McQueenSemanticColors.Failed
         VpnConnectionState.DISCONNECTED -> McQueenSemanticColors.CrimsonAccent
@@ -1179,15 +1194,18 @@ private fun PreferencesSheetContent(
     autoBootEnabled: Boolean,
     bypassLanEnabled: Boolean,
     manifestUrl: String,
+    manifestHasAuthToken: Boolean,
     manifestUpdatedAt: String?,
     onSetThemeMode: (String) -> Unit,
     onSetAutoBoot: (Boolean) -> Unit,
     onSetBypassLan: (Boolean) -> Unit,
-    onSaveManifestUrl: (String) -> Unit,
+    onSaveManifestUrl: (String, String, Boolean) -> Unit,
     onResetManifestUrl: () -> Unit,
     onOpenLicenses: () -> Unit,
 ) {
     var draftUrl by remember(manifestUrl) { mutableStateOf(manifestUrl) }
+    var draftToken by remember(manifestHasAuthToken) { mutableStateOf("") }
+    var clearTokenRequested by remember(manifestHasAuthToken) { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -1260,6 +1278,43 @@ private fun PreferencesSheetContent(
                     .fillMaxWidth()
                     .testTag("manifest_url_input"),
             )
+            OutlinedTextField(
+                value = draftToken,
+                onValueChange = {
+                    draftToken = it
+                    if (it.isNotEmpty()) clearTokenRequested = false
+                },
+                label = {
+                    val labelRes = if (manifestHasAuthToken && !clearTokenRequested) {
+                        R.string.mcqueen_settings_manifest_token_saved
+                    } else {
+                        R.string.mcqueen_settings_manifest_token_hint
+                    }
+                    Text(stringResource(labelRes))
+                },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("manifest_token_input"),
+            )
+            if ((manifestHasAuthToken && !clearTokenRequested) || draftToken.isNotEmpty()) {
+                TextButton(
+                    onClick = {
+                        draftToken = ""
+                        clearTokenRequested = true
+                    },
+                    modifier = Modifier.testTag("manifest_token_clear_button"),
+                ) {
+                    Text(stringResource(R.string.mcqueen_settings_manifest_token_clear))
+                }
+            }
+            Text(
+                text = stringResource(R.string.mcqueen_settings_manifest_sync_note),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             if (!manifestUpdatedAt.isNullOrBlank()) {
                 Text(
                     text = stringResource(R.string.mcqueen_settings_last_updated, manifestUpdatedAt),
@@ -1280,7 +1335,7 @@ private fun PreferencesSheetContent(
                     Text(stringResource(R.string.mcqueen_settings_manifest_reset))
                 }
                 Button(
-                    onClick = { onSaveManifestUrl(draftUrl) },
+                    onClick = { onSaveManifestUrl(draftUrl, draftToken, clearTokenRequested) },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                     ),

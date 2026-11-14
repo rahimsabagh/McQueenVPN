@@ -1,8 +1,58 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:width="66dp"
-        android:height="66dp"
-        android:drawable="@drawable/img_app_icon_1794642128954"
-        android:gravity="center" />
-</layer-list>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Upper twin-peak white geometric M ridge -->
+    <path
+        android:pathData="M24.5,71.5 L45.8,36.2 L52.6,44.4 L63.2,36.0 L71.2,47.4 C64.6,45.8 56.6,48.8 50.4,54.2 L45.8,48.8 L38.6,58.6 L38.0,59.8 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="24.5"
+                android:startY="71.5"
+                android:endX="66.0"
+                android:endY="36.0"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#DCE4F0" />
+                <item android:offset="0.35" android:color="#FFFFFF" />
+                <item android:offset="1.0" android:color="#FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Lower curved speed swoosh underside deep-navy fold -->
+    <path
+        android:pathData="M38.6,71.4 C48.4,62.4 59.8,57.4 71.2,60.2 C78.4,62.0 82.8,65.2 83.6,68.6 C83.8,71.8 80.2,73.2 74.6,72.4 C65.8,71.0 56.2,62.4 38.6,71.4 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="42.0"
+                android:startY="70.0"
+                android:endX="83.0"
+                android:endY="68.0"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#02183A" />
+                <item android:offset="0.6" android:color="#052C6E" />
+                <item android:offset="1.0" android:color="#0A45A6" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Lower curved speed swoosh cyan-to-cobalt highlight crest -->
+    <path
+        android:pathData="M38.2,71.6 C48.6,58.6 62.6,48.2 72.4,49.8 C78.2,50.8 83.2,61.6 83.6,68.6 C82.2,65.0 77.6,61.6 70.6,59.8 C59.8,57.0 48.2,61.8 38.2,71.6 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="38.2"
+                android:startY="71.6"
+                android:endX="83.0"
+                android:endY="58.0"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#00E5FF" />
+                <item android:offset="0.45" android:color="#009CFF" />
+                <item android:offset="1.0" android:color="#0052EB" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

@@ -5,9 +5,12 @@ import com.v2ray.ang.AppConfig
 import com.v2ray.ang.BuildConfig
 import com.v2ray.ang.core.AetherCoreManager
 import com.v2ray.ang.core.AetherDelayTester
+import com.v2ray.ang.core.AetherIdentityProvisioner
+import com.v2ray.ang.core.AetherProvisionResult
 import com.v2ray.ang.core.CoreConfigManager
 import com.v2ray.ang.core.CoreNativeManager
 import com.v2ray.ang.core.CoreOutboundBuilder
+import com.v2ray.ang.core.ProvisionFailureKind
 import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.handler.MmkvManager
@@ -38,8 +41,22 @@ sealed class ManifestSyncOutcome {
     data class Failure(val reason: String) : ManifestSyncOutcome()
 }
 
+enum class TunnelEngine {
+    XRAY,
+    AETHER,
+}
+
+sealed class CountryIdentityStatus {
+    data class Ready(val newlyProvisioned: Boolean) : CountryIdentityStatus()
+    data class Failed(
+        val kind: ProvisionFailureKind,
+        val diagnosticDetail: String? = null,
+    ) : CountryIdentityStatus()
+}
+
 class McQueenServerRepository(
     private val httpClient: OkHttpClient = defaultHttpClient(),
+    private val identityProvisioner: AetherIdentityProvisioner = AetherIdentityProvisioner(),
 ) {
 
     fun getConfiguredUrl(): String {
@@ -51,17 +68,38 @@ class McQueenServerRepository(
         return resolved
     }
 
-    fun saveCustomUrl(url: String): Boolean {
+    fun getConfiguredAuthToken(): String? =
+        MmkvManager.decodeSettingsString(AppConfig.PREF_MCQUEEN_MANIFEST_TOKEN)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+    fun hasConfiguredAuthToken(): Boolean = getConfiguredAuthToken() != null
+
+    fun saveCustomUrl(url: String): Boolean = saveCustomManifestConfig(url = url)
+
+    fun saveCustomManifestConfig(
+        url: String,
+        authTokenInput: String? = null,
+        clearAuthToken: Boolean = false,
+    ): Boolean {
         val trimmed = url.trim()
         if (!McQueenServerConfig.isValidManifestUrl(trimmed)) {
             return false
         }
         MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_SERVERS_URL, trimmed)
+        when {
+            clearAuthToken -> MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_MANIFEST_TOKEN, "")
+            !authTokenInput.isNullOrBlank() -> MmkvManager.encodeSettings(
+                AppConfig.PREF_MCQUEEN_MANIFEST_TOKEN,
+                authTokenInput.trim(),
+            )
+        }
         return true
     }
 
     fun resetCustomUrl() {
         MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_SERVERS_URL, McQueenServerConfig.DEFAULT_SERVERS_URL)
+        MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_MANIFEST_TOKEN, "")
     }
 
     suspend fun loadCachedManifest(context: Context): ManifestParseResult? = withContext(Dispatchers.IO) {
@@ -89,14 +127,17 @@ class McQueenServerRepository(
     suspend fun syncFromGitHub(
         context: Context,
         urlOverride: String? = null,
+        authTokenOverride: String? = null,
     ): ManifestSyncOutcome = withContext(Dispatchers.IO) {
         val targetUrl = urlOverride?.trim()?.takeIf { it.isNotEmpty() } ?: getConfiguredUrl()
         if (!McQueenServerConfig.isValidManifestUrl(targetUrl)) {
             return@withContext ManifestSyncOutcome.Failure("Invalid HTTPS server directory URL")
         }
+        val effectiveToken = authTokenOverride?.trim()?.takeIf { it.isNotEmpty() }
+            ?: getConfiguredAuthToken()
 
         val responseJson = try {
-            fetchManifestJson(targetUrl)
+            fetchManifestJson(targetUrl, effectiveToken)
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "McQueenServerRepository: fetch failed", e)
             return@withContext ManifestSyncOutcome.Failure(
@@ -161,7 +202,7 @@ class McQueenServerRepository(
                             maxConcurrency = McQueenServerConfig.MAX_CONCURRENT_PROBES,
                         ) { candidate ->
                             val profile = profileMap[candidate.guid]
-                            if (profile != null && profile.configType != EConfigType.AETHER) {
+                            if (profile != null && engineFor(profile) == TunnelEngine.XRAY) {
                                 probeRealOutboundDelay(context, candidate.guid, profile)
                             } else {
                                 // Avoid spawning multiple full Aether/Tor/Psiphon sessions during passive list scan;
@@ -172,7 +213,7 @@ class McQueenServerRepository(
 
                         val bestReal = ranked.firstOrNull { candidate ->
                             val profile = profileMap[candidate.guid]
-                            candidate.latencyMs > 0L && profile?.configType != EConfigType.AETHER
+                            candidate.latencyMs > 0L && profile != null && engineFor(profile) == TunnelEngine.XRAY
                         }?.latencyMs
                         val bestAny = ranked.firstOrNull { it.latencyMs > 0L }?.latencyMs
                         country.copy(
@@ -189,12 +230,80 @@ class McQueenServerRepository(
         }
     }
 
+    suspend fun hasPendingIdentityProvisioning(
+        context: Context,
+        countryCode: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val normalizedCode = countryCode.trim().uppercase(Locale.ROOT)
+        val candidates = loadStoredProfilesByCountry()[normalizedCode].orEmpty()
+        candidates.any { (_, profile) ->
+            engineFor(profile) == TunnelEngine.AETHER &&
+                !identityProvisioner.hasValidIdentity(context, profile)
+        }
+    }
+
+    suspend fun ensureIdentitiesForCountry(
+        context: Context,
+        countryCode: String,
+    ): CountryIdentityStatus = withContext(Dispatchers.IO) {
+        val normalizedCode = countryCode.trim().uppercase(Locale.ROOT)
+        val candidates = loadStoredProfilesByCountry()[normalizedCode].orEmpty()
+        if (candidates.isEmpty()) {
+            return@withContext CountryIdentityStatus.Ready(newlyProvisioned = false)
+        }
+
+        val hasNonAetherCandidate = candidates.any { (_, profile) -> engineFor(profile) != TunnelEngine.AETHER }
+        val aetherCandidates = candidates.filter { (_, profile) -> engineFor(profile) == TunnelEngine.AETHER }
+        if (aetherCandidates.isEmpty()) {
+            return@withContext CountryIdentityStatus.Ready(newlyProvisioned = false)
+        }
+
+        val distinctByFiles = linkedMapOf<List<String>, ProfileItem>()
+        for ((_, profile) in aetherCandidates) {
+            val required = identityProvisioner.requiredFiles(profile).sorted()
+            distinctByFiles.putIfAbsent(required, profile)
+        }
+
+        var readyGroupCount = 0
+        var newlyProvisioned = false
+        var firstFailure: AetherProvisionResult.Failed? = null
+
+        for ((_, profile) in distinctByFiles) {
+            when (val result = identityProvisioner.ensureIdentity(context, profile)) {
+                is AetherProvisionResult.NotRequired,
+                is AetherProvisionResult.AlreadyReady -> readyGroupCount++
+                is AetherProvisionResult.Provisioned -> {
+                    readyGroupCount++
+                    newlyProvisioned = true
+                }
+                is AetherProvisionResult.Failed -> {
+                    if (firstFailure == null) {
+                        firstFailure = result
+                    }
+                }
+            }
+        }
+
+        if (readyGroupCount > 0 || hasNonAetherCandidate) {
+            CountryIdentityStatus.Ready(newlyProvisioned = newlyProvisioned)
+        } else {
+            val failure = firstFailure ?: AetherProvisionResult.Failed(ProvisionFailureKind.IDENTITY_MISSING)
+            CountryIdentityStatus.Failed(
+                kind = failure.kind,
+                diagnosticDetail = failure.diagnosticDetail,
+            )
+        }
+    }
+
     suspend fun selectCandidatesForCountry(
         context: Context,
         countryCode: String,
     ): List<CandidateLatency> = withContext(Dispatchers.IO) {
         val normalizedCode = countryCode.trim().uppercase(Locale.ROOT)
-        val candidates = loadStoredProfilesByCountry()[normalizedCode].orEmpty()
+        val allCandidates = loadStoredProfilesByCountry()[normalizedCode].orEmpty()
+        val candidates = allCandidates.filter { (_, profile) ->
+            engineFor(profile) != TunnelEngine.AETHER || identityProvisioner.hasValidIdentity(context, profile)
+        }
         if (candidates.isEmpty()) return@withContext emptyList()
         val profileMap = candidates.toMap()
 
@@ -220,18 +329,20 @@ class McQueenServerRepository(
         profile: ProfileItem,
         candidate: SelectableCandidate,
     ): Long {
-        if (profile.configType == EConfigType.AETHER) {
-            val realDelay = runCatching {
-                AetherDelayTester.measure(
-                    context = context,
-                    guid = guid,
-                    profile = profile,
-                    url = SettingsManager.getDelayTestUrl(),
-                )
-            }.getOrDefault(-1L)
-            return if (realDelay > 0L) realDelay else probeTcpReachability(candidate)
+        return when (engineFor(profile)) {
+            TunnelEngine.AETHER -> {
+                val realDelay = runCatching {
+                    AetherDelayTester.measure(
+                        context = context,
+                        guid = guid,
+                        profile = profile,
+                        url = SettingsManager.getDelayTestUrl(),
+                    )
+                }.getOrDefault(-1L)
+                if (realDelay > 0L) realDelay else probeTcpReachability(candidate)
+            }
+            TunnelEngine.XRAY -> probeRealOutboundDelay(context, guid, profile)
         }
-        return probeRealOutboundDelay(context, guid, profile)
     }
 
     private suspend fun probeRealOutboundDelay(
@@ -276,14 +387,21 @@ class McQueenServerRepository(
         }
     }
 
-    private fun fetchManifestJson(url: String): String {
-        val request = Request.Builder()
+    internal fun fetchManifestJson(url: String, authToken: String? = null): String {
+        val requestBuilder = Request.Builder()
             .url(url)
             .header("Accept", "application/json")
             .header("Cache-Control", "no-cache")
-            .build()
 
-        httpClient.newCall(request).execute().use { response ->
+        val sanitizedToken = authToken?.trim()?.takeIf { it.isNotEmpty() }
+        if (sanitizedToken != null) {
+            if (!McQueenServerConfig.isAuthEligibleUrl(url)) {
+                throw IOException("Refused sending credentials to non-HTTPS URL")
+            }
+            requestBuilder.header("Authorization", "Bearer $sanitizedToken")
+        }
+
+        httpClient.newCall(requestBuilder.build()).execute().use { response ->
             if (!McQueenServerConfig.isValidManifestUrl(response.request.url.toString())) {
                 throw IOException("Refused non-HTTPS manifest response URL")
             }
@@ -354,6 +472,11 @@ class McQueenServerRepository(
     }
 
     companion object {
+        fun engineFor(profile: ProfileItem): TunnelEngine = engineFor(profile.configType)
+
+        fun engineFor(configType: EConfigType): TunnelEngine =
+            if (configType == EConfigType.AETHER) TunnelEngine.AETHER else TunnelEngine.XRAY
+
         fun defaultHttpClient(): OkHttpClient {
             return OkHttpClient.Builder()
                 .connectTimeout(McQueenServerConfig.REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)

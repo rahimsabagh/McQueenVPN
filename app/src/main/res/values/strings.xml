@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name" translatable="false">McQueen VPN</string>
-    <string name="app_widget_name">Switch</string>
-    <string name="app_tile_name">Switch</string>
+    <string name="app_widget_name">McQueen VPN</string>
+    <string name="app_tile_name">McQueen VPN</string>
     <string name="app_tile_first_use">Select a country in McQueen VPN before using this feature.</string>
     <string name="navigation_drawer_open">Open navigation drawer</string>
     <string name="navigation_drawer_close">Close navigation drawer</string>
@@ -169,7 +169,7 @@
     <string name="server_lab_pinned_ca256">Certificate fingerprint (SHA-256)</string>
     <string name="server_lab_browser_dialer">Enable Browser Dialer</string>
     <string name="server_lab_browser_dialer_tip">Only supports xhttp (packet-up) and ws outbound; TLS-related settings may be ignored or conflict</string>
-    <string name="toast_allow_insecure_deprecated">Current node uses an unencrypted connection. Your communication may be directly viewed by network intermediate facilities controlled by authoritarian governments.\nFor security reasons, such nodes cannot be connected via Xray core version 26.2.6+.\nIf it is a self-built node, please enable security encryption such as TLS, or pin the certificate pinnedCA256.\nIf it is a provider node, please contact the service provider to complete the technical upgrade. If the service provider refuses to cooperate, it is recommended to switch to a provider that pays more attention to user security.\nFor more information, please visit https://github.com/2dust/v2rayN/discussions/9460</string>
+    <string name="toast_allow_insecure_deprecated">This server configuration uses an unencrypted connection that is blocked for security. Please refresh locations or select another country.</string>
     <string name="pinned_ca256_action_fetch">Fetch certificate fingerprint</string>
     <string name="toast_fetch_cert_sha256_success">Certificate fingerprint fetched successfully</string>
     <string name="toast_fetch_cert_sha256_failed">Failed to fetch certificate fingerprint</string>
@@ -817,15 +817,24 @@
     <!-- McQueen VPN -->
     <string name="mcqueen_brand_subtitle">Private, Effortless Protection</string>
     <string name="mcqueen_status_disconnected">Disconnected</string>
+    <string name="mcqueen_status_preparing">Preparing</string>
     <string name="mcqueen_status_connecting">Connecting</string>
     <string name="mcqueen_status_connected">Connected</string>
     <string name="mcqueen_status_reconnecting">Reconnecting</string>
     <string name="mcqueen_status_failed">Connection failed</string>
     <string name="mcqueen_status_hint_disconnected">Select a country and tap Connect</string>
+    <string name="mcqueen_status_hint_preparing">Preparing secure connection</string>
     <string name="mcqueen_status_hint_connecting">Testing &amp; establishing encrypted tunnel…</string>
     <string name="mcqueen_status_hint_connected">Your traffic is encrypted and routed securely</string>
     <string name="mcqueen_status_hint_reconnecting">Switching to next available server…</string>
     <string name="mcqueen_status_hint_failed">Could not reach servers. Tap to retry</string>
+    <string name="mcqueen_preparing_secure_connection">Preparing secure connection</string>
+    <string name="mcqueen_error_identity_missing">Secure identity files are missing or unreadable. Tap Retry to set up again.</string>
+    <string name="mcqueen_error_registration_api_unreachable">Cannot reach identity registration service. Check your connection and retry.</string>
+    <string name="mcqueen_error_registration_rejected">Identity registration was rejected by the service. Please try again later.</string>
+    <string name="mcqueen_error_identity_persistence_failure">Could not save secure identity files to device storage.</string>
+    <string name="mcqueen_error_aether_process_startup_failure">Secure tunnel core failed to start on this device.</string>
+    <string name="mcqueen_error_tunnel_handshake_failure">Tunnel handshake failed before traffic could pass. Tap Retry.</string>
     <string name="mcqueen_action_connect">Connect</string>
     <string name="mcqueen_action_disconnect">Disconnect</string>
     <string name="mcqueen_action_cancel">Cancel</string>
@@ -852,7 +861,7 @@
     <string name="mcqueen_vpn_permission_denied">VPN permission is required to connect</string>
     <string name="mcqueen_acc_refresh">Refresh locations</string>
     <string name="mcqueen_acc_settings">Open settings</string>
-    <string name="mcqueen_acc_emblem">McQueen VPN Shield</string>
+    <string name="mcqueen_acc_emblem">McQueen VPN logo</string>
     <string name="mcqueen_settings_title">Preferences</string>
     <string name="mcqueen_settings_appearance">Appearance</string>
     <string name="mcqueen_settings_theme_dark">Dark</string>
@@ -862,6 +871,10 @@
     <string name="mcqueen_settings_bypass_lan">Bypass local network</string>
     <string name="mcqueen_settings_manifest_source">Server Directory Source</string>
     <string name="mcqueen_settings_manifest_hint">Raw GitHub HTTPS URL for servers.json</string>
+    <string name="mcqueen_settings_manifest_token_hint">Optional Bearer token (private HTTPS)</string>
+    <string name="mcqueen_settings_manifest_token_saved">Token saved — enter new token to replace</string>
+    <string name="mcqueen_settings_manifest_token_clear">Clear token</string>
+    <string name="mcqueen_settings_manifest_sync_note">Syncs on launch and approx. every 30 min in background (exact timing depends on Android battery optimization).</string>
     <string name="mcqueen_settings_manifest_save">Save &amp; Sync</string>
     <string name="mcqueen_settings_manifest_reset">Reset Default</string>
     <string name="mcqueen_settings_manifest_invalid">Please enter a valid HTTPS URL</string>

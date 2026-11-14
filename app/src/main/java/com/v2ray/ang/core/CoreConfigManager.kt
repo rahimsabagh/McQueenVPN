@@ -23,6 +23,7 @@ import com.v2ray.ang.util.JsonUtil
 import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.PackageUidResolver
 import com.v2ray.ang.util.Utils
+import java.io.File
 
 object CoreConfigManager {
     private var initConfigCache: String? = null
@@ -1044,15 +1045,16 @@ object CoreConfigManager {
         }
 
         if (MmkvManager.decodeSettingsBool(AppConfig.PREF_FAKE_DNS_ENABLED, true)) {
-            val geositeCn = arrayListOf(AppConfig.GEOSITE_CN)
+            val geoAssets = geoAssetSanitizer(configContext.context)
             val routingDomains = configContext.routingDomainRules
                 .asSequence()
                 .filter { it.outboundTag != AppConfig.TAG_BLOCKED }
                 .flatMap { it.domain.asSequence() }
                 .toList()
                 .distinct()
-            val finalDomain = geositeCn + routingDomains
-            // fakedns with all domains to make it always top priority
+            val rawDomains = arrayListOf(AppConfig.GEOSITE_CN) + routingDomains
+            val finalDomain = geoAssets.sanitizeRuleDomains(rawDomains)
+            // fakedns with available domains to make it always top priority
             // PattNG: no "fakedns" block, so Xray-core applies its default fake IP pools
             v2rayConfig.dns?.servers?.add(
                 0,
@@ -1353,11 +1355,13 @@ object CoreConfigManager {
     private fun buildDnsHostsFromRoutingRules(configContext: CoreConfigContext): MutableMap<String, Any> {
         val hosts = mutableMapOf<String, Any>()
 
-        val blockDomains = configContext.routingDomainRules
+        val geoAssets = geoAssetSanitizer(configContext.context)
+        val rawBlockDomains = configContext.routingDomainRules
             .asSequence()
             .filter { it.outboundTag == AppConfig.TAG_BLOCKED }
             .flatMap { it.domain.asSequence() }
             .toList()
+        val blockDomains = geoAssets.sanitizeRuleDomains(rawBlockDomains).orEmpty()
         if (blockDomains.isNotEmpty()) {
             hosts.putAll(blockDomains.map { it to AppConfig.LOOPBACK })
         }
@@ -1396,6 +1400,11 @@ object CoreConfigManager {
     }
 
     internal fun buildDnsCnModeFromRoutingRules(configContext: CoreConfigContext, servers: ArrayList<Any>, domesticDns: List<String>): List<String> {
+        val geoAssets = geoAssetSanitizer(configContext.context)
+        if (!geoAssets.hasGeositeDat || !geoAssets.canUseGeoipCn()) {
+            return emptyList()
+        }
+
         val cnRegionFilter = { domain: String ->
             domain.startsWith("geosite:") && (domain.endsWith("-cn") || domain.endsWith("@cn"))
                     || domain == AppConfig.GEOSITE_CN
@@ -1410,13 +1419,14 @@ object CoreConfigManager {
             return emptyList()
         }
 
-        val geoipCn = arrayListOf(AppConfig.GEOIP_CN)
+        val geoipCn = geoAssets.sanitizeRuleIps(listOf(AppConfig.GEOIP_CN)) ?: return emptyList()
         val cnDomains = configContext.routingDomainRules
             .asSequence()
             .filter { it.outboundTag == AppConfig.TAG_DIRECT }
             .flatMap { it.domain.asSequence() }
             .filter { cnRegionFilter(it) }
             .toList()
+            .let { geoAssets.sanitizeRuleDomains(it).orEmpty() }
         if (cnDomains.isEmpty()) {
             return emptyList()
         }
@@ -1444,8 +1454,10 @@ object CoreConfigManager {
         remoteDns: List<String>,
         domesticDns: List<String>,
     ): MutableList<String> {
+        val geoAssets = geoAssetSanitizer(configContext.context)
         val domesticDnsTags = mutableListOf<String>()
         configContext.routingDomainRules.forEachIndexed { ruleIndex, rule ->
+            val sanitizedDomains = geoAssets.sanitizeRuleDomains(rule.domain) ?: return@forEachIndexed
             when (rule.outboundTag) {
                 AppConfig.TAG_DIRECT -> {
                     domesticDns.forEachIndexed { dnsIndex, address ->
@@ -1453,7 +1465,7 @@ object CoreConfigManager {
                         servers.add(
                             V2rayConfig.DnsBean.ServersBean(
                                 address = address,
-                                domains = rule.domain,
+                                domains = sanitizedDomains,
                                 skipFallback = true,
                                 finalQuery = if (dnsIndex == domesticDns.lastIndex) true else null,
                                 tag = tag
@@ -1469,7 +1481,7 @@ object CoreConfigManager {
                         servers.add(
                             V2rayConfig.DnsBean.ServersBean(
                                 address = address,
-                                domains = rule.domain,
+                                domains = sanitizedDomains,
                                 finalQuery = if (index == remoteDns.lastIndex) true else null
                             )
                         )
@@ -1621,19 +1633,7 @@ object CoreConfigManager {
         }
 
         val rule = JsonUtil.fromJson(JsonUtil.toJson(item), V2rayConfig.RoutingBean.RulesBean::class.java) ?: return
-
-        // Replace specific geoip rules with ext versions
-        rule.ip?.let { ipList ->
-            val updatedIpList = ArrayList<String>()
-            ipList.forEach { ip ->
-                when (ip) {
-                    AppConfig.GEOIP_CN -> updatedIpList.add("ext:${AppConfig.GEOIP_ONLY_CN_PRIVATE_DAT}:cn")
-                    AppConfig.GEOIP_PRIVATE -> updatedIpList.add("ext:${AppConfig.GEOIP_ONLY_CN_PRIVATE_DAT}:private")
-                    else -> updatedIpList.add(ip)
-                }
-            }
-            rule.ip = updatedIpList
-        }
+        val geoAssets = geoAssetSanitizer(context)
 
         if (SettingsManager.canUseProcessRouting()) {
             // Convert process package names to UIDs
@@ -1647,20 +1647,26 @@ object CoreConfigManager {
             rule.process = null
         }
 
-        val outboundTag = rule.outboundTag
+        // Sanitize geoip/geosite/ext matchers against installed asset files and drop rules left empty.
+        val sanitizedRule = geoAssets.sanitizeRoutingRule(rule) ?: return
+
+        val outboundTag = sanitizedRule.outboundTag
 
         // Route rules targeting a custom policy-group tag should hit its balancer.
         policyGroupBalancerTags[outboundTag]?.let { balancerTag ->
-            rule.outboundTag = null
-            rule.balancerTag = balancerTag
+            sanitizedRule.outboundTag = null
+            sanitizedRule.balancerTag = balancerTag
         }
 
         // PattNG: a target that could not be built keeps its name here rather than fall back to proxy, the main server,
         // which would send the rule's traffic another way than it names: the session is refused for it, see
         // unbuiltRoutingTarget. A latency test, which leaves the targets out, clears the rules.
 
-        v2rayConfig.routing.rules.add(rule)
+        v2rayConfig.routing.rules.add(sanitizedRule)
     }
+
+    private fun geoAssetSanitizer(context: Context): GeoAssetSanitizer =
+        GeoAssetSanitizer.forDirectory(File(Utils.userAssetPath(context)))
 
 
     /**

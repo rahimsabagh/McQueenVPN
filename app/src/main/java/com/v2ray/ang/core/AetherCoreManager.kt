@@ -772,6 +772,22 @@ object AetherCoreManager {
     }
 
     /**
+     * Returns the exact path environment variables passed to `libaether.so`:
+     * - `HOME` & `AETHER_CONFIG` always point to permanent app-private [workDir] (`<filesDir>/aether`).
+     * - `AETHER_MASQUE_CONFIG` and `AETHER_WG_CONFIG` point inside [keysDir] (which is `aether-renewal/`
+     *   during registration/renewal and `aether/` during normal tunnel operation).
+     *
+     * Aether v2.4.0 derives secondary and gool keys directly as siblings of `AETHER_MASQUE_CONFIG` /
+     * `AETHER_WG_CONFIG` (`aether-masque-secondary.toml`, `aether-wg-secondary.toml`, `aether-masque-gool.toml`).
+     */
+    internal fun identityEnvironment(workDir: File, keysDir: File): Map<String, String> = mapOf(
+        "HOME" to workDir.absolutePath,
+        "AETHER_CONFIG" to File(workDir, AetherIdentityManager.BASE_FILE).absolutePath,
+        "AETHER_MASQUE_CONFIG" to File(keysDir, AetherIdentityManager.MASQUE_FILE).absolutePath,
+        "AETHER_WG_CONFIG" to File(keysDir, AetherIdentityManager.WIREGUARD_FILE).absolutePath,
+    )
+
+    /**
      * Starts a core on [arguments]. It uses, or registers where there are none, the keys in the
      * identity folder, or in [keysDir] instead, where a renewal gathers new keys apart from the keys
      * in use.
@@ -788,7 +804,7 @@ object AetherCoreManager {
         if (!AetherIdentityManager.settle(context)) {
             LogUtil.w(AppConfig.TAG, "AetherCore: the renewed keys could not all be moved into place; the keys not moved yet stay in use")
         }
-        val keys = keysDir ?: workDir
+        val keys = (keysDir ?: workDir).apply { mkdirs() }
         val shippedList = if (PSIPHON_SERVER_ENTRIES in arguments) {
             PsiphonServerList.entriesFile(File(Utils.userAssetPath(context)), workDir) { problem ->
                 LogUtil.w(AppConfig.TAG, "AetherCore: ${AppConfig.PSIPHON_SERVERS_DAT} is not a usable Psiphon list; the entries kept from before stay", problem)
@@ -810,11 +826,8 @@ object AetherCoreManager {
             certificateDirectories(File::isDirectory)?.let { put(CERT_DIR_ENV, it) }
             psiphonOverlay(workDir)?.let { put(PSIPHON_CONFIG_ENV, it.absolutePath) }
             put(PSIPHON_DIR_ENV, (if (markSession) psiphonStateDir(context.filesDir, workDir) else psiphonProbeDir(context.filesDir)).absolutePath)
-            put("HOME", workDir.absolutePath)
             put("TMPDIR", context.cacheDir.absolutePath)
-            put("AETHER_CONFIG", File(workDir, AetherIdentityManager.BASE_FILE).absolutePath)
-            put("AETHER_MASQUE_CONFIG", File(keys, AetherIdentityManager.MASQUE_FILE).absolutePath)
-            put("AETHER_WG_CONFIG", File(keys, AetherIdentityManager.WIREGUARD_FILE).absolutePath)
+            putAll(identityEnvironment(workDir, keys))
         }
         return builder.start()
     }

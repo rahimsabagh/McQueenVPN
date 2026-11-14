@@ -4,6 +4,7 @@ import java.util.Locale
 
 enum class VpnConnectionState {
     DISCONNECTED,
+    PREPARING,
     CONNECTING,
     CONNECTED,
     RECONNECTING,
@@ -16,8 +17,8 @@ sealed class FailoverDecision {
 }
 
 /**
- * Pure JVM-testable state machine governing McQueen VPN's 5 connection states and
- * automatic server failover progression across a country's ranked candidates.
+ * Pure JVM-testable state machine governing McQueen VPN's connection states (including first-run
+ * identity preparation) and automatic server failover progression across a country's ranked candidates.
  */
 class ConnectionSessionCoordinator {
 
@@ -33,6 +34,11 @@ class ConnectionSessionCoordinator {
     fun currentState(): VpnConnectionState = state
 
     fun currentGuid(): String? = candidateQueue.getOrNull(currentIndex)
+
+    fun startPreparing(): VpnConnectionState {
+        resetSession(targetState = VpnConnectionState.PREPARING, clearReason = true)
+        return state
+    }
 
     fun startAttempt(candidateGuids: List<String>): String? {
         candidateQueue = candidateGuids

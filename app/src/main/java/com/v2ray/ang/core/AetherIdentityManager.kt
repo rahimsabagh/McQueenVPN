@@ -90,8 +90,11 @@ object AetherIdentityManager {
 
     private const val SOURCE = "aether-key"
 
-    private val identityField = Regex("""^(device_id|ipv4|ipv6)\s*=\s*"([^"]*)"$""")
+    private val identityField = Regex("""^(device_id|access_token|ipv4|ipv6|wg_private_key|cert_pem)\s*=\s*(?:"([^"]*)"|'([^']*)')(?:\s*#.*)?$""")
+    private val multilineKeyStart = Regex("""^([A-Za-z0-9_]+)\s*=\s*(\"\"\"|''')(.*)$""")
     private val multilineDelimiter = Regex("\"\"\"|'''")
+    private const val PEM_BEGIN_MARKER = "-----BEGIN CERTIFICATE-----"
+    private const val PEM_END_MARKER = "-----END CERTIFICATE-----"
 
     /** The core's last word in a registration, once every key it was asked for is saved. */
     private val keysRegistered = Regex("""identities ready: \S""")
@@ -120,8 +123,10 @@ object AetherIdentityManager {
      * Registers new keys of [kind] by running the core on [arguments], which register them, see
      * [AetherKeys], and puts them in place of the keys in use once all of them are there. Until then
      * the keys in use stay where they are, untouched, so a failure, a cancellation or the app being
-     * killed leaves them in use; the keys of another kind are never touched. The core dials out
-     * through the exit-node [exit]. Returns the new keys, or null when the keys in use stay.
+     * killed leaves them in use; the keys of another kind are never touched. When
+     * [preserveValidExisting] is true, any file in [files] that is already valid in permanent
+     * storage is preserved without overwriting. The core dials out through the exit-node [exit].
+     * Returns the new keys, or null when the keys in use stay.
      */
     suspend fun renew(
         context: Context,
@@ -129,11 +134,17 @@ object AetherIdentityManager {
         arguments: List<String>,
         exit: AetherExit,
         onOutput: (String) -> Unit,
+        preserveValidExisting: Boolean = false,
     ): List<AetherKey>? = renewal.withLock {
         val workDir = workDir(context)
         val renewalDir = renewalDir(context)
         val files = filesOf(kind)
-        if (!renew(workDir, renewalDir, files) { register(context, arguments, exit, renewalDir, onOutput) }) return@withLock null
+        if (!renew(workDir, renewalDir, files, preserveValidExisting = preserveValidExisting) {
+                register(context, arguments, exit, renewalDir, onOutput)
+            }
+        ) {
+            return@withLock null
+        }
         withContext(Dispatchers.IO) {
             if (!settle(workDir, renewalDir)) {
                 LogUtil.w(AppConfig.TAG, "AetherIdentity: the new keys are ready but not all in place yet; the next core start moves the rest")
@@ -244,20 +255,100 @@ object AetherIdentityManager {
     /** Each of [files] in [dir] with the identity it holds. */
     internal fun keys(dir: File, files: List<String>): List<AetherKey> = files.map { AetherKey(it, read(File(dir, it))) }
 
-    internal fun parse(text: String): AetherIdentity? {
+    /**
+     * Parses a persisted Aether identity TOML file and verifies that both Cloudflare device
+     * registration (`device_id`, `access_token`) AND required enrollment / WARP activation
+     * (`ipv4`/`ipv6`, plus `cert_pem` for MASQUE or `wg_private_key` for WireGuard) succeeded.
+     *
+     * Note: Aether v2.4.0 persists device registration credentials early before enrollment and
+     * WARP activation complete; partial files containing only `device_id` (or missing `cert_pem` /
+     * `wg_private_key` / `access_token` / tunnel IP) must therefore be rejected as incomplete.
+     */
+    internal fun parse(text: String, fileName: String? = null): AetherIdentity? {
         val fields = mutableMapOf<String, String>()
-        var insideMultiline = false
+        var activeMultilineDelim: String? = null
+        var activeMultilineKey: String? = null
+        val multilineBuffer = StringBuilder()
+
         for (raw in text.lineSequence()) {
             val line = raw.trim()
-            if (!insideMultiline) {
-                identityField.matchEntire(line)?.destructured?.let { (key, value) -> fields.putIfAbsent(key, value) }
+            if (activeMultilineDelim != null) {
+                val endIndex = line.indexOf(activeMultilineDelim)
+                if (endIndex >= 0) {
+                    if (activeMultilineKey == "cert_pem") {
+                        val prefix = line.substring(0, endIndex)
+                        if (prefix.isNotEmpty()) {
+                            if (multilineBuffer.isNotEmpty()) multilineBuffer.append('\n')
+                            multilineBuffer.append(prefix)
+                        }
+                        fields.putIfAbsent("cert_pem", multilineBuffer.toString())
+                    }
+                    activeMultilineDelim = null
+                    activeMultilineKey = null
+                    multilineBuffer.clear()
+                } else if (activeMultilineKey == "cert_pem") {
+                    if (multilineBuffer.isNotEmpty()) multilineBuffer.append('\n')
+                    multilineBuffer.append(line)
+                }
+                continue
             }
-            if (multilineDelimiter.findAll(line).count() % 2 == 1) {
-                insideMultiline = !insideMultiline
+
+            val mlMatch = multilineKeyStart.matchEntire(line)
+            if (mlMatch != null) {
+                val (key, delim, rest) = mlMatch.destructured
+                val closeIndex = rest.indexOf(delim)
+                if (closeIndex >= 0) {
+                    if (key == "cert_pem") {
+                        fields.putIfAbsent("cert_pem", rest.substring(0, closeIndex))
+                    }
+                } else {
+                    activeMultilineDelim = delim
+                    activeMultilineKey = key
+                    multilineBuffer.clear()
+                    if (key == "cert_pem" && rest.isNotEmpty()) {
+                        multilineBuffer.append(rest)
+                    }
+                }
+                continue
+            }
+
+            identityField.matchEntire(line)?.let { match ->
+                val key = match.groupValues[1]
+                val value = match.groupValues[2].ifEmpty { match.groupValues[3] }
+                fields.putIfAbsent(key, value)
+            } ?: run {
+                if (multilineDelimiter.findAll(line).count() % 2 == 1) {
+                    activeMultilineDelim = multilineDelimiter.find(line)?.value
+                    activeMultilineKey = null
+                }
             }
         }
+
         val deviceId = fields["device_id"]?.takeIf { it.isNotBlank() } ?: return null
-        return AetherIdentity(deviceId, fields["ipv4"].orEmpty(), fields["ipv6"].orEmpty())
+        val accessToken = fields["access_token"]?.takeIf { it.isNotBlank() } ?: return null
+        val ipv4 = fields["ipv4"].orEmpty().trim()
+        val ipv6 = fields["ipv6"].orEmpty().trim()
+        if (ipv4.isBlank() && ipv6.isBlank()) return null
+
+        val wgPrivateKey = fields["wg_private_key"].orEmpty().trim()
+        val certPem = fields["cert_pem"].orEmpty()
+        val enrolled = when (fileName) {
+            MASQUE_FILE, MASQUE_INNER_FILE -> hasValidCertificatePem(certPem)
+            WIREGUARD_FILE, WIREGUARD_INNER_FILE, MASQUE_GOOL_FILE -> wgPrivateKey.isNotBlank()
+            else -> hasValidCertificatePem(certPem) || wgPrivateKey.isNotBlank()
+        }
+        if (!enrolled || accessToken.isBlank()) return null
+
+        return AetherIdentity(deviceId, ipv4, ipv6)
+    }
+
+    private fun hasValidCertificatePem(pem: String?): Boolean {
+        if (pem.isNullOrBlank()) return false
+        val begin = pem.indexOf(PEM_BEGIN_MARKER)
+        val end = pem.indexOf(PEM_END_MARKER)
+        if (begin < 0 || end <= begin) return false
+        val body = pem.substring(begin + PEM_BEGIN_MARKER.length, end)
+        return body.isNotBlank()
     }
 
     /**
@@ -273,14 +364,17 @@ object AetherIdentityManager {
      * Gathers new keys in [renewalDir] through [register] and moves them over the keys in [workDir]
      * once every one of [files] is there and reads as a key. Nothing in [workDir] is touched before
      * that moment, so whatever stops a renewal earlier leaves the keys in use as they were; a stop
-     * after it is finished by [settle]. A key not among [files] stays as it is. True when the new
-     * keys took the place of the old ones. The steps on the files run on [io].
+     * after it is finished by [settle]. A key not among [files] stays as it is. When
+     * [preserveValidExisting] is true, any file among [files] that already reads as a valid key in
+     * [workDir] is not overwritten during settlement. True when the new keys took the place of the
+     * missing/renewed ones. The steps on the files run on [io].
      */
     internal suspend fun renew(
         workDir: File,
         renewalDir: File,
         files: List<String>,
         io: CoroutineDispatcher = Dispatchers.IO,
+        preserveValidExisting: Boolean = false,
         register: suspend () -> Boolean,
     ): Boolean {
         val cleared = withContext(io) {
@@ -297,7 +391,23 @@ object AetherIdentityManager {
                 withContext(io) {
                     // A key the run left beside the ones asked for goes with the folder rather than into place.
                     (KEY_FILES - files.toSet()).forEach { File(renewalDir, it).delete() }
-                    ready.set(isComplete(renewalDir, files) && markReady(renewalDir))
+                    val complete = if (preserveValidExisting) {
+                        files.all { name ->
+                            read(File(renewalDir, name)) != null || read(File(workDir, name)) != null
+                        }.also { allSatisfied ->
+                            if (allSatisfied) {
+                                // Never overwrite a valid existing identity file in permanent storage.
+                                files.forEach { name ->
+                                    if (read(File(workDir, name)) != null) {
+                                        File(renewalDir, name).delete()
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        isComplete(renewalDir, files)
+                    }
+                    ready.set(complete && markReady(renewalDir))
                 }
             }
         } finally {
@@ -348,7 +458,7 @@ object AetherIdentityManager {
     }
 
     private fun read(file: File): AetherIdentity? = try {
-        if (file.isFile) parse(file.readText()) else null
+        if (file.isFile) parse(file.readText(), file.name) else null
     } catch (_: IOException) {
         null
     }

@@ -9,6 +9,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewModelScope
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
+import com.v2ray.ang.core.AetherIdentityProvisioner
 import com.v2ray.ang.core.LauncherManager
 import com.v2ray.ang.dto.ConnectionTestResult
 import com.v2ray.ang.dto.TrafficStatsSnapshot
@@ -18,6 +19,7 @@ import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.SettingsManager
 import com.v2ray.ang.helper.MessageHelper
 import com.v2ray.ang.mcqueen.ConnectionSessionCoordinator
+import com.v2ray.ang.mcqueen.CountryIdentityStatus
 import com.v2ray.ang.mcqueen.CountryUiModel
 import com.v2ray.ang.mcqueen.FailoverDecision
 import com.v2ray.ang.mcqueen.ManifestSyncOutcome
@@ -52,6 +54,7 @@ data class McQueenUiState(
     val syncError: String? = null,
     val manifestUpdatedAt: String? = null,
     val manifestUrl: String = "",
+    val manifestHasAuthToken: Boolean = false,
     val autoBootEnabled: Boolean = false,
     val bypassLanEnabled: Boolean = true,
 )
@@ -64,6 +67,7 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
     private val _uiState = MutableStateFlow(
         McQueenUiState(
             manifestUrl = repository.getConfiguredUrl(),
+            manifestHasAuthToken = repository.hasConfiguredAuthToken(),
             autoBootEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_IS_BOOTED, false),
             bypassLanEnabled = SettingsManager.routingRulesetsBypassLan(),
         )
@@ -217,6 +221,7 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
         startVpnCallback = startVpnService
         when (_uiState.value.connectionState) {
             VpnConnectionState.CONNECTED,
+            VpnConnectionState.PREPARING,
             VpnConnectionState.CONNECTING,
             VpnConnectionState.RECONNECTING -> {
                 disconnect()
@@ -292,12 +297,21 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
         }
     }
 
-    fun saveManifestUrlAndSync(rawUrl: String): Boolean {
-        if (!repository.saveCustomUrl(rawUrl)) {
+    fun saveManifestUrlAndSync(
+        rawUrl: String,
+        rawAuthToken: String = "",
+        clearAuthToken: Boolean = false,
+    ): Boolean {
+        if (!repository.saveCustomManifestConfig(rawUrl, rawAuthToken, clearAuthToken)) {
             toastError(R.string.mcqueen_settings_manifest_invalid)
             return false
         }
-        _uiState.update { it.copy(manifestUrl = repository.getConfiguredUrl()) }
+        _uiState.update {
+            it.copy(
+                manifestUrl = repository.getConfiguredUrl(),
+                manifestHasAuthToken = repository.hasConfiguredAuthToken(),
+            )
+        }
         McQueenManifestUpdater.sync(app, forceReschedule = true)
         syncCountries(showToast = true)
         return true
@@ -305,7 +319,12 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
 
     fun resetManifestUrlAndSync() {
         repository.resetCustomUrl()
-        _uiState.update { it.copy(manifestUrl = repository.getConfiguredUrl()) }
+        _uiState.update {
+            it.copy(
+                manifestUrl = repository.getConfiguredUrl(),
+                manifestHasAuthToken = false,
+            )
+        }
         McQueenManifestUpdater.sync(app, forceReschedule = true)
         syncCountries(showToast = true)
     }
@@ -325,6 +344,47 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
         }
 
         failoverJob = viewModelScope.launch {
+            if (repository.hasPendingIdentityProvisioning(app, country.countryCode)) {
+                coordinator.startPreparing()
+                _uiState.update {
+                    it.copy(
+                        connectionState = VpnConnectionState.PREPARING,
+                        statusDetail = getString(R.string.mcqueen_preparing_secure_connection),
+                        downloadBps = 0L,
+                        uploadBps = 0L,
+                    )
+                }
+            }
+
+            when (val identityStatus = repository.ensureIdentitiesForCountry(app, country.countryCode)) {
+                is CountryIdentityStatus.Failed -> {
+                    val failureMessage = getString(identityStatus.kind.userMessageRes)
+                    coordinator.onStartFailure(failureMessage)
+                    _uiState.update {
+                        it.copy(
+                            connectionState = VpnConnectionState.FAILED,
+                            statusDetail = failureMessage,
+                            downloadBps = 0L,
+                            uploadBps = 0L,
+                        )
+                    }
+                    return@launch
+                }
+
+                is CountryIdentityStatus.Ready -> Unit
+            }
+
+            if (userRequestedDisconnect) return@launch
+
+            _uiState.update {
+                it.copy(
+                    connectionState = VpnConnectionState.CONNECTING,
+                    statusDetail = getString(R.string.mcqueen_testing_country, country.countryName),
+                    downloadBps = 0L,
+                    uploadBps = 0L,
+                )
+            }
+
             val ranked = repository.selectCandidatesForCountry(app, country.countryCode)
             val firstGuid = coordinator.startAttempt(ranked.map { it.guid })
             if (firstGuid == null) {
@@ -428,9 +488,12 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
         if (result != null && result.delayMillis >= 0L) {
             promoteToConnected()
         } else {
-            val reason = result?.errorMessage?.takeIf { it.isNotBlank() }
-                ?: getString(R.string.mcqueen_tunnel_check_failed)
-            LogUtil.w(AppConfig.TAG, "McQueenViewModel: post-connect tunnel verification failed: $reason")
+            val safeError = result?.errorMessage
+                ?.let(AetherIdentityProvisioner::sanitizeDiagnosticLine)
+                ?.takeIf { it.isNotBlank() }
+            val tunnelFailure = AetherIdentityProvisioner.classifyTunnelFailure(safeError)
+            val reason = getString(tunnelFailure.userMessageRes)
+            LogUtil.w(AppConfig.TAG, "McQueenViewModel: post-connect tunnel verification failed: kind=$tunnelFailure")
             LauncherManager.stopService(app)
             handleStartFailure(reason)
         }

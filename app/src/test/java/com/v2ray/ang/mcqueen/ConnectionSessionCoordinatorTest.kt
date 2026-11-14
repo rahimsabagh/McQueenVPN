@@ -99,4 +99,25 @@ class ConnectionSessionCoordinatorTest {
         assertEquals("00:01:05", ConnectionSessionCoordinator.formatDuration(65_000L))
         assertEquals("01:02:03", ConnectionSessionCoordinator.formatDuration(3_723_900L))
     }
+
+    @Test
+    fun `supports PREPARING state before connecting and clean cancellation back to DISCONNECTED`() {
+        val coordinator = ConnectionSessionCoordinator()
+        assertEquals(VpnConnectionState.PREPARING, coordinator.startPreparing())
+        assertEquals(VpnConnectionState.PREPARING, coordinator.onServiceRunningQuery())
+
+        // User cancels during first-run identity setup
+        assertEquals(VpnConnectionState.DISCONNECTED, coordinator.onUserDisconnect())
+
+        // Second attempt prepares then proceeds to CONNECTING
+        assertEquals(VpnConnectionState.PREPARING, coordinator.startPreparing())
+        assertEquals("aether-us-1", coordinator.startAttempt(listOf("aether-us-1")))
+        assertEquals(VpnConnectionState.CONNECTING, coordinator.currentState())
+
+        // Registration failure during PREPARING enters FAILED directly
+        assertEquals(VpnConnectionState.PREPARING, coordinator.startPreparing())
+        val exhausted = coordinator.onStartFailure("Cannot reach registration service")
+        assertTrue(exhausted is FailoverDecision.Exhausted)
+        assertEquals(VpnConnectionState.FAILED, coordinator.currentState())
+    }
 }

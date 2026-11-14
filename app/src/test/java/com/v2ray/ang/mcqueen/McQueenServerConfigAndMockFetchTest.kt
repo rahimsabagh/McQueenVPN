@@ -1,21 +1,42 @@
 package com.v2ray.ang.mcqueen
 
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequest
+import com.v2ray.ang.util.JsonUtil
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.io.File
+import java.io.IOException
+import java.util.concurrent.TimeUnit
 
 class McQueenServerConfigAndMockFetchTest {
 
     @Test
-    fun `validates https urls, migrates legacy main branch url, and rejects insecure remote http`() {
+    fun `validates https urls, 30-minute schedule constants, my-releases branch, and unique work policies`() {
+        assertEquals("my-releases", McQueenServerConfig.DEFAULT_GITHUB_BRANCH)
         assertEquals(
             "https://raw.githubusercontent.com/rahimsabagh/McQueenVPN/my-releases/servers.json",
             McQueenServerConfig.DEFAULT_SERVERS_URL,
+        )
+        assertEquals(30L, McQueenServerConfig.MANIFEST_REFRESH_INTERVAL_MINUTES)
+        assertTrue(
+            TimeUnit.MINUTES.toMillis(McQueenServerConfig.MANIFEST_REFRESH_INTERVAL_MINUTES) >=
+                PeriodicWorkRequest.MIN_PERIODIC_INTERVAL_MILLIS,
+        )
+        assertEquals(
+            ExistingPeriodicWorkPolicy.KEEP,
+            McQueenManifestUpdater.periodicWorkPolicy(forceReschedule = false),
+        )
+        assertEquals(
+            ExistingPeriodicWorkPolicy.UPDATE,
+            McQueenManifestUpdater.periodicWorkPolicy(forceReschedule = true),
         )
         assertEquals(
             McQueenServerConfig.DEFAULT_SERVERS_URL,
@@ -30,6 +51,44 @@ class McQueenServerConfigAndMockFetchTest {
         assertTrue(McQueenServerConfig.isValidManifestUrl("http://127.0.0.1:8080/servers.json"))
         assertFalse(McQueenServerConfig.isValidManifestUrl("http://example.com/servers.json"))
         assertFalse(McQueenServerConfig.isValidManifestUrl("not-a-url"))
+    }
+
+    @Test
+    fun `repository servers_json matches schema, keeps credentialed entries disabled, and contains no real credentials`() {
+        val candidates = listOf(File("../servers.json"), File("servers.json"))
+        val manifestFile = candidates.firstOrNull { it.isFile }
+            ?: error("Expected /servers.json to exist in repository root")
+
+        val json = manifestFile.readText()
+        val dto = JsonUtil.fromJsonSafe(json, RemoteServerManifestDto::class.java)
+            ?: error("Failed to decode /servers.json")
+
+        assertEquals(1, dto.version)
+        val entries = dto.servers.orEmpty()
+        assertTrue(entries.isNotEmpty())
+
+        val credentialedSamples = entries.filterNot { it.config.orEmpty().startsWith("aether://") }
+        assertTrue(
+            credentialedSamples.all { it.enabled == false },
+            "Credentialed sample entries in /servers.json must stay disabled by default",
+        )
+        assertTrue(
+            credentialedSamples.all { entry ->
+                val cfg = entry.config.orEmpty()
+                cfg.contains(".invalid") || cfg.contains("203.0.113.") || cfg.contains("198.51.100.") || cfg.contains("192.0.2.")
+            },
+            "Credentialed sample entries in /servers.json must only use documentation/RFC5737 placeholder endpoints",
+        )
+
+        val enabledEntries = entries.filter { it.enabled == true }
+        assertTrue(
+            enabledEntries.all { it.config.orEmpty().startsWith("aether://") },
+            "Only keyless aether:// profiles may be enabled in public /servers.json",
+        )
+
+        val parsed = RemoteServerManifestParser.parse(json, isAetherSupported = true)
+        assertEquals(enabledEntries.size, parsed.servers.size)
+        assertEquals(entries.size - enabledEntries.size, parsed.skippedCount)
     }
 
     @Test
@@ -79,6 +138,40 @@ class McQueenServerConfigAndMockFetchTest {
     }
 
     @Test
+    fun `fetchManifestJson attaches Bearer token only when supplied and blocks insecure remote http`() {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val payload = """{"version":1,"updated_at":"2026-11-14T00:00:00Z","servers":[]}"""
+            server.enqueue(MockResponse(code = 200, body = payload))
+            server.enqueue(MockResponse(code = 200, body = payload))
+
+            val repository = McQueenServerRepository(McQueenServerRepository.defaultHttpClient())
+            val url = server.url("/private/servers.json").toString()
+
+            val publicBody = repository.fetchManifestJson(url, authToken = null)
+            assertEquals(payload, publicBody)
+            val publicRecorded = server.takeRequest()
+            assertNull(publicRecorded.headers["Authorization"])
+
+            val privateBody = repository.fetchManifestJson(url, authToken = "  runtime_test_token_123  ")
+            assertEquals(payload, privateBody)
+            val authRecorded = server.takeRequest()
+            assertEquals("Bearer runtime_test_token_123", authRecorded.headers["Authorization"])
+
+            var rejectedRemoteHttp = false
+            try {
+                repository.fetchManifestJson("http://example.com/servers.json", authToken = "runtime_test_token_123")
+            } catch (_: IOException) {
+                rejectedRemoteHttp = true
+            }
+            assertTrue(rejectedRemoteHttp, "Credentials must never be sent to remote cleartext HTTP URLs")
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
     fun `defaultHttpClient blocks redirect to non-https remote url`() {
         val server = MockWebServer()
         server.start()
@@ -94,7 +187,7 @@ class McQueenServerConfigAndMockFetchTest {
             var blocked = false
             try {
                 client.newCall(Request.Builder().url(url).build()).execute().close()
-            } catch (_: java.io.IOException) {
+            } catch (_: IOException) {
                 blocked = true
             }
             assertTrue(blocked, "Expected redirect to remote HTTP URL to be blocked")

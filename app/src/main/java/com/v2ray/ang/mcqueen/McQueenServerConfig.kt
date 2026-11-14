@@ -6,12 +6,17 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
  * Centralized remote manifest location for McQueen VPN.
  *
  * Security & private-repository architecture:
- * - No GitHub Personal Access Tokens or credentials are ever bundled in the APK.
- * - For public repositories, point [DEFAULT_SERVERS_URL] to raw.githubusercontent.com over HTTPS.
- * - If your server directory lives in a private GitHub repository, host a lightweight tokenless
- *   HTTPS proxy (e.g., Cloudflare Worker / GitHub App / signed CDN endpoint) that reads the
- *   private repo using server-side credentials and serves `servers.json` over HTTPS, then configure
- *   its HTTPS URL here or via the in-app Server Directory Source setting.
+ * - No GitHub Personal Access Tokens or credentials are ever bundled in the APK or committed to
+ *   the public repository.
+ * - For public repositories, [DEFAULT_SERVERS_URL] points to the `my-releases` branch over HTTPS.
+ * - For private server directories, configure an authenticated HTTPS endpoint (or HTTPS proxy such
+ *   as a Cloudflare Worker / GitHub App endpoint) and supply an optional Bearer token at runtime
+ *   via Preferences; tokens are stored only in local device storage and transmitted solely over HTTPS.
+ *
+ * Background sync scheduling:
+ * - Periodic sync is scheduled every [MANIFEST_REFRESH_INTERVAL_MINUTES] (30 minutes) via a unique
+ *   WorkManager task, alongside startup sync. Android Doze, App Standby, and device battery
+ *   optimizations are respected, so periodic execution is best-effort and not exact.
  */
 object McQueenServerConfig {
     const val DEFAULT_GITHUB_OWNER = "rahimsabagh"
@@ -32,7 +37,7 @@ object McQueenServerConfig {
     const val CONNECT_ATTEMPT_TIMEOUT_MS = 20_000L
     const val AETHER_CONNECT_ATTEMPT_TIMEOUT_MS = 65_000L
     const val TUNNEL_VERIFY_TIMEOUT_MS = 15_000L
-    const val MANIFEST_REFRESH_INTERVAL_HOURS = 6L
+    const val MANIFEST_REFRESH_INTERVAL_MINUTES = 30L
     const val MANIFEST_REFRESH_TASK_NAME = "mcqueen_manifest_updater"
 
     fun resolveActiveUrl(storedUrl: String?): String {
@@ -52,8 +57,13 @@ object McQueenServerConfig {
         val parsed = trimmed.toHttpUrlOrNull() ?: return false
         return when {
             parsed.isHttps -> true
-            parsed.scheme == "http" && (parsed.host == "127.0.0.1" || parsed.host == "localhost") -> true
+            isLoopbackHttp(parsed) -> true
             else -> false
         }
     }
+
+    internal fun isAuthEligibleUrl(url: String): Boolean = isValidManifestUrl(url)
+
+    private fun isLoopbackHttp(url: okhttp3.HttpUrl): Boolean =
+        url.scheme == "http" && (url.host == "127.0.0.1" || url.host == "localhost")
 }

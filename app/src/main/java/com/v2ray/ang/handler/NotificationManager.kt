@@ -31,7 +31,6 @@ object NotificationManager {
     private const val NOTIFICATION_PENDING_INTENT_CONTENT = 0
     private const val NOTIFICATION_PENDING_INTENT_STOP_V2RAY = 1
     private const val NOTIFICATION_PENDING_INTENT_RESTART_V2RAY = 2
-    private const val NOTIFICATION_ICON_THRESHOLD = 3000
     private const val QUERY_INTERVAL_MS = 1000L
     private const val NOTIFICATION_UPDATE_TICKS = 3
 
@@ -118,7 +117,7 @@ object NotificationManager {
         }
 
         mBuilder = NotificationCompat.Builder(service, channelId)
-            .setSmallIcon(R.drawable.ic_stat_name)
+            .setSmallIcon(R.drawable.ic_stat_mcqueen)
             .setContentTitle(notificationTitle)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
@@ -178,7 +177,7 @@ object NotificationManager {
         speedNotificationJob?.let {
             it.cancel()
             speedNotificationJob = null
-            updateNotification("", 0, 0)
+            updateNotification("")
         }
     }
 
@@ -208,16 +207,10 @@ object NotificationManager {
      * @param proxyTraffic The proxy traffic.
      * @param directTraffic The direct traffic.
      */
-    private fun updateNotification(contentText: String?, proxyTraffic: Long, directTraffic: Long) {
+    private fun updateNotification(contentText: String?) {
         // Taken once: the speed job runs on its own thread, and a stop clears the builder meanwhile.
         val builder = mBuilder ?: return
-        if (proxyTraffic < NOTIFICATION_ICON_THRESHOLD && directTraffic < NOTIFICATION_ICON_THRESHOLD) {
-            builder.setSmallIcon(R.drawable.ic_stat_name)
-        } else if (proxyTraffic > directTraffic) {
-            builder.setSmallIcon(R.drawable.ic_stat_proxy)
-        } else {
-            builder.setSmallIcon(R.drawable.ic_stat_direct)
-        }
+        builder.setSmallIcon(R.drawable.ic_stat_mcqueen)
         lastContentText = contentText
         val content = composeContentText()
         builder.setStyle(NotificationCompat.BigTextStyle().bigText(content))
@@ -328,7 +321,7 @@ object NotificationManager {
                 directUplink / sinceLastQueryInSeconds,
                 directDownlink / sinceLastQueryInSeconds
             )
-            updateNotification(text.toString(), proxyTotal, directTotal)
+            updateNotification(text.toString())
         }
         lastQueryTime = queryTime
         return zeroSpeed
