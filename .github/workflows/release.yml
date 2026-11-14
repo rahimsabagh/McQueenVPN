@@ -151,7 +151,13 @@ jobs:
           fi
 
           apk="${apks[0]}"
-          apksigner verify --verbose --print-certs "$apk"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          if [[ ! -x "$APKSIGNER" ]]; then
+            echo "::error::apksigner not found at $APKSIGNER; check Android Build Tools installation"
+            ls -la "$ANDROID_HOME/build-tools/" || true
+            exit 1
+          fi
+          "$APKSIGNER" verify --verbose --print-certs "$apk"
 
           entries="$(unzip -Z1 "$apk")"
           for abi in armeabi-v7a arm64-v8a x86_64; do
