@@ -5,21 +5,21 @@
   "servers": [
     {
       "id": "ir-wg",
-      "country": "ایران",
+      "country": "1ایران",
       "country_code": "IR",
       "config": "aether://?protocol=wg&scan=balanced&ip=v4#IR1",
       "enabled": true
     },
     {
       "id": "ir-masque",
-      "country": "ایران",
+      "country": "1ایران",
       "country_code": "IR",
       "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox#IR2",
       "enabled": true
     },
     {
       "id": "ir-gool",
-      "country": "ایران",
+      "country": "1ایران",
       "country_code": "IR",
       "config": "aether://?protocol=gool&scan=balanced&ip=v4#IR3",
       "enabled": true
