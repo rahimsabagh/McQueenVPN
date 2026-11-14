@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "updated_at": "2026-11-14T00:00:00Z",
+  "version": 2,
+  "updated_at": "2026-11-14T15:10:10.870Z",
   "servers": [
     {"id":"at-01","country":"Austria","country_code":"AT","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AT#AT1","enabled":true},
     {"id":"au-01","country":"Australia","country_code":"AU","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AU#AU1","enabled":true},
