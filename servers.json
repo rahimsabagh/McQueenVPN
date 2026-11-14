@@ -20,8 +20,8 @@
       "id": "us-sample-01",
       "country": "United States",
       "country_code": "US",
-      "config": "hysteria2://SAMPLE_PASSWORD_REPLACE_ME@192.0.2.30:443/?sni=example.invalid#US-Sample-01",
-      "enabled": false
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=US#aa",
+      "enabled": true
     }
   ]
 }
