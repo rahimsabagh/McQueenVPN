@@ -1,4 +1,4 @@
-name: Build Signed Release APK
+name: Build Signed Release AAB
 
 on:
   workflow_dispatch:
@@ -7,27 +7,26 @@ permissions:
   contents: read
 
 concurrency:
-  group: mcqueenvpn-release-apk
+  group: mcqueenvpn-release-aab
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build signed Android APK
+    name: Build signed Android App Bundle
     runs-on: ubuntu-latest
     env:
-      RUST_TOOLCHAIN: stable
-      GO_VERSION: "1.26"
+      GO_VERSION: "1.27"
       NDK_VERSION: "27.2.12479018"
 
     steps:
       - name: Checkout repository and submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -85,24 +84,16 @@ jobs:
           test -s "$RUNNER_TEMP/release.jks"
 
       - name: Build hev SOCKS5 tunnel native libraries
-        run: |
-          chmod +x compile-hevtun.sh
-          ./compile-hevtun.sh
+        run: bash compile-hevtun.sh
 
       - name: Build Aether native core
-        run: |
-          chmod +x compile-aether.sh
-          ./compile-aether.sh
+        run: bash compile-aether.sh
 
       - name: Build Psiphon client
-        run: |
-          chmod +x compile-psiphon.sh
-          ./compile-psiphon.sh
+        run: bash compile-psiphon.sh
 
       - name: Build Tor pluggable transport
-        run: |
-          chmod +x compile-pt.sh
-          ./compile-pt.sh
+        run: bash compile-pt.sh
 
       - name: Stage native libraries
         run: |
@@ -117,7 +108,7 @@ jobs:
       - name: Resolve AndroidLibXrayLite release
         id: xray
         run: |
-          test -d AndroidLibXrayLite
+          git -C AndroidLibXrayLite fetch --tags --force
           tag="$(git -C AndroidLibXrayLite describe --tags --abbrev=0)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Using AndroidLibXrayLite tag: $tag"
@@ -130,60 +121,68 @@ jobs:
           fileName: libv2ray.aar
           out-file-path: app/libs/
 
-      - name: Build signed Release APK
+      - name: Verify libv2ray AAR exists
+        run: |
+          test -s app/libs/libv2ray.aar
+          unzip -l app/libs/libv2ray.aar | grep -q 'classes.jar'
+
+      - name: Build signed Release AAB
         env:
           RELEASE_STORE_FILE: ${{ runner.temp }}/release.jks
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
-          gradle --no-daemon :app:assembleRelease
+          gradle --no-daemon :app:bundleRelease
 
-      - name: Verify APK signature and native payload
+      - name: Verify AAB signature, certificate, and native payload
         shell: bash
         run: |
           shopt -s nullglob
-          apks=(app/build/outputs/apk/release/*.apk)
-          if (( ${#apks[@]} != 1 )); then
-            echo "::error::Expected exactly one Release APK, found ${#apks[@]}"
-            printf '%s\n' "${apks[@]}"
+          aabs=(app/build/outputs/bundle/release/*.aab)
+          if (( ${#aabs[@]} != 1 )); then
+            echo "::error::Expected exactly one Release AAB, found ${#aabs[@]}"
+            printf '%s\n' "${aabs[@]}"
             exit 1
           fi
 
-          apk="${apks[0]}"
-          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
-          if [[ ! -x "$APKSIGNER" ]]; then
-            echo "::error::apksigner not found at $APKSIGNER; check Android Build Tools installation"
-            ls -la "$ANDROID_HOME/build-tools/" || true
+          aab="${aabs[0]}"
+          jarsigner -verify "$aab"
+
+          actual_sha256="$(keytool -printcert -jarfile "$aab" | awk -F': ' '/SHA256:/ {gsub(":", "", $2); print toupper($2); exit}')"
+          expected_sha256="761BA39200F977B1AFE71C6ADDFDFB567EF1D7913E1BBB724A6EC4670A5521FD"
+          if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+            echo "::error::AAB signing certificate SHA-256 does not match the Play Console upload certificate."
+            echo "Expected: $expected_sha256"
+            echo "Actual:   $actual_sha256"
             exit 1
           fi
-          "$APKSIGNER" verify --verbose --print-certs "$apk"
 
-          entries="$(unzip -Z1 "$apk")"
-          for abi in armeabi-v7a arm64-v8a x86_64; do
+          entries="$(unzip -Z1 "$aab")"
+          for abi in arm64-v8a armeabi-v7a x86_64; do
             for library in libaether.so libpsiphon-tunnel-core.so liblyrebird.so; do
-              grep -Fqx "lib/$abi/$library" <<< "$entries" || {
-                echo "::error::APK is missing lib/$abi/$library"
+              grep -Fqx "base/lib/$abi/$library" <<< "$entries" || {
+                echo "::error::AAB is missing base/lib/$abi/$library"
                 exit 1
               }
             done
           done
 
-          echo "Verified signed APK: $apk"
-          sha256sum "$apk" | tee "$RUNNER_TEMP/apk-sha256.txt"
+          echo "Verified signed Release AAB: $aab"
+          sha256sum "$aab" | tee "$RUNNER_TEMP/aab-sha256.txt"
 
-      - name: Upload signed Release APK
+      - name: Upload signed Release AAB
         uses: actions/upload-artifact@v4
         with:
-          name: McQueenVPN-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          name: McQueenVPN-release-AAB
+          path: app/build/outputs/bundle/release/*.aab
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload APK checksum
+      - name: Upload AAB checksum
         uses: actions/upload-artifact@v4
         with:
-          name: McQueenVPN-release-apk-sha256
-          path: ${{ runner.temp }}/apk-sha256.txt
+          name: McQueenVPN-release-AAB-sha256
+          path: ${{ runner.temp }}/aab-sha256.txt
           if-no-files-found: error
           retention-days: 30
