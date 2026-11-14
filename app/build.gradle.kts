@@ -30,27 +30,24 @@ android {
             }
         }
         create("release") {
-            val releasePath = System.getenv("RELEASE_STORE_FILE")
-                ?: (project.findProperty("RELEASE_STORE_FILE") as? String)
-                ?: "${rootDir}/release.keystore"
-            val releaseKs = file(releasePath)
-            val fallbackKs = file("${rootDir}/debug.keystore")
-            if (releaseKs.exists()) {
-                storeFile = releaseKs
-                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
-                    ?: (project.findProperty("RELEASE_STORE_PASSWORD") as? String)
-                    ?: "YOUR_STORE_PASSWORD"
-                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
-                    ?: (project.findProperty("RELEASE_KEY_ALIAS") as? String)
-                    ?: "YOUR_KEY_ALIAS"
-                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
-                    ?: (project.findProperty("RELEASE_KEY_PASSWORD") as? String)
-                    ?: "YOUR_KEY_PASSWORD"
-            } else if (fallbackKs.exists()) {
-                storeFile = fallbackKs
-                storePassword = "android"
-                keyAlias = "androiddebugkey"
-                keyPassword = "android"
+            val releaseStoreFile = System.getenv("RELEASE_STORE_FILE")?.trim()
+            val releaseStorePassword = System.getenv("RELEASE_STORE_PASSWORD")?.trim()
+            val releaseKeyAlias = System.getenv("RELEASE_KEY_ALIAS")?.trim()
+            val releaseKeyPassword = System.getenv("RELEASE_KEY_PASSWORD")?.trim()
+
+            if (!releaseStoreFile.isNullOrEmpty() &&
+                !releaseStorePassword.isNullOrEmpty() &&
+                !releaseKeyAlias.isNullOrEmpty() &&
+                !releaseKeyPassword.isNullOrEmpty()
+            ) {
+                val direct = file(releaseStoreFile)
+                val resolvedStore = if (direct.exists()) direct else rootProject.file(releaseStoreFile)
+                if (resolvedStore.isFile) {
+                    storeFile = resolvedStore
+                    storePassword = releaseStorePassword
+                    keyAlias = releaseKeyAlias
+                    keyPassword = releaseKeyPassword
+                }
             }
         }
     }
@@ -66,6 +63,46 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+    }
+
+    gradle.taskGraph.whenReady {
+        val requiresReleaseSigning = allTasks.any { task ->
+            task.project == project && (
+                task.name == "bundleRelease" ||
+                    task.name == "assembleRelease" ||
+                    task.name == "packageRelease" ||
+                    task.name == "packageReleaseBundle" ||
+                    task.name == "signReleaseBundle" ||
+                    task.name == "validateSigningRelease"
+                )
+        }
+        if (requiresReleaseSigning) {
+            val releaseStoreFile = System.getenv("RELEASE_STORE_FILE")?.trim()
+            val releaseStorePassword = System.getenv("RELEASE_STORE_PASSWORD")?.trim()
+            val releaseKeyAlias = System.getenv("RELEASE_KEY_ALIAS")?.trim()
+            val releaseKeyPassword = System.getenv("RELEASE_KEY_PASSWORD")?.trim()
+
+            val missingVars = buildList {
+                if (releaseStoreFile.isNullOrEmpty()) add("RELEASE_STORE_FILE")
+                if (releaseStorePassword.isNullOrEmpty()) add("RELEASE_STORE_PASSWORD")
+                if (releaseKeyAlias.isNullOrEmpty()) add("RELEASE_KEY_ALIAS")
+                if (releaseKeyPassword.isNullOrEmpty()) add("RELEASE_KEY_PASSWORD")
+            }
+            if (missingVars.isNotEmpty()) {
+                throw GradleException(
+                    "Release signing failed: missing or blank environment variable(s): ${missingVars.joinToString(", ")}. " +
+                        "Configure RELEASE_STORE_FILE (e.g. ../release.jks), RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, and RELEASE_KEY_PASSWORD."
+                )
+            }
+
+            val direct = file(releaseStoreFile!!)
+            val resolvedStore = if (direct.exists()) direct else rootProject.file(releaseStoreFile)
+            if (!resolvedStore.isFile) {
+                throw GradleException(
+                    "Release signing failed: keystore file not found at '${resolvedStore.path}' (configured RELEASE_STORE_FILE='$releaseStoreFile'; expected ../release.jks relative to app module)."
+                )
+            }
         }
     }
 
