@@ -29,6 +29,30 @@ android {
                 keyPassword = "android"
             }
         }
+        create("release") {
+            val releasePath = System.getenv("RELEASE_STORE_FILE")
+                ?: (project.findProperty("RELEASE_STORE_FILE") as? String)
+                ?: "${rootDir}/release.keystore"
+            val releaseKs = file(releasePath)
+            val fallbackKs = file("${rootDir}/debug.keystore")
+            if (releaseKs.exists()) {
+                storeFile = releaseKs
+                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
+                    ?: (project.findProperty("RELEASE_STORE_PASSWORD") as? String)
+                    ?: "YOUR_STORE_PASSWORD"
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                    ?: (project.findProperty("RELEASE_KEY_ALIAS") as? String)
+                    ?: "YOUR_KEY_ALIAS"
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+                    ?: (project.findProperty("RELEASE_KEY_PASSWORD") as? String)
+                    ?: "YOUR_KEY_PASSWORD"
+            } else if (fallbackKs.exists()) {
+                storeFile = fallbackKs
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
     }
 
     buildTypes {
@@ -36,6 +60,7 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
