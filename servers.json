@@ -61,35 +61,35 @@
     },
     {
       "id": "at-gool",
-      "country": "austria",
+      "country": "Austria",
       "country_code": "AT",
       "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AT#AT3",
       "enabled": true
     },
     {
       "id": "au-wg",
-      "country": "australia",
+      "country": "Australia",
       "country_code": "AU",
       "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AU#AU1",
       "enabled": true
     },
     {
       "id": "au-masque",
-      "country": "australia",
+      "country": "Australia",
       "country_code": "AU",
       "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=AU#AU2",
       "enabled": true
     },
     {
       "id": "au-gool",
-      "country": "australia",
+      "country": "Australia",
       "country_code": "AU",
       "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AU#AU3",
       "enabled": true
     },
     {
       "id": "be-wg",
-      "country": "belgium",
+      "country": "Belgium",
       "country_code": "BE",
       "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=BE#BE1",
       "enabled": true
