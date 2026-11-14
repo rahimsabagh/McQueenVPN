@@ -5,56 +5,56 @@
   "servers": [
     {
       "id": "ir-wg",
-      "country": "Auto select (fastest, iran ip)",
+      "country": ".Auto select (fastest, iran ip)",
       "country_code": "IR",
       "config": "aether://?protocol=wg&scan=balanced&ip=v4#IR1",
       "enabled": true
     },
     {
       "id": "ir-masque",
-      "country": "Auto select (fastest, iran ip)",
+      "country": ".Auto select (fastest, iran ip)",
       "country_code": "IR",
       "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox#IR2",
       "enabled": true
     },
     {
       "id": "ir-gool",
-      "country": "Auto select (fastest, iran ip)",
+      "country": ".Auto select (fastest, iran ip)",
       "country_code": "IR",
       "config": "aether://?protocol=gool&scan=balanced&ip=v4#IR3",
       "enabled": true
     },
     {
       "id": "auto-wg",
-      "country": "Auto select (fast, not iran ip)",
+      "country": ".Auto select (fast, not iran ip)",
       "country_code": "UN",
       "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto#UN1",
       "enabled": true
     },
     {
       "id": "auto-masque",
-      "country": "Auto select (fast, not iran ip)",
+      "country": ".Auto select (fast, not iran ip)",
       "country_code": "UN",
       "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto#UN2",
       "enabled": true
     },
     {
       "id": "auto-gool",
-      "country": "Auto select (fast, not iran ip)",
+      "country": ".Auto select (fast, not iran ip)",
       "country_code": "UN",
       "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto#UN3",
       "enabled": true
     },
     {
       "id": "at-wg",
-      "country": "austria",
+      "country": "Austria",
       "country_code": "AT",
       "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AT#AT1",
       "enabled": true
     },
     {
       "id": "at-masque",
-      "country": "austria",
+      "country": "Austria",
       "country_code": "AT",
       "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=AT#AT2",
       "enabled": true
