@@ -1,33 +1,595 @@
+
 {
-  "version": 2,
-  "updated_at": "2026-11-14T15:10:10.870Z",
+  "version": 3,
+  "updated_at": "2026-11-14T15:19:04.591Z",
   "servers": [
-    {"id":"at-01","country":"Austria","country_code":"AT","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AT#AT1","enabled":true},
-    {"id":"au-01","country":"Australia","country_code":"AU","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AU#AU1","enabled":true},
-    {"id":"be-01","country":"Belgium","country_code":"BE","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=BE#BE1","enabled":true},
-    {"id":"br-01","country":"Brazil","country_code":"BR","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=BR#BR1","enabled":true},
-    {"id":"ca-01","country":"Canada","country_code":"CA","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=CA#CA1","enabled":true},
-    {"id":"ch-01","country":"Switzerland","country_code":"CH","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=CH#CH1","enabled":true},
-    {"id":"cz-01","country":"Czechia","country_code":"CZ","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=CZ#CZ1","enabled":true},
-    {"id":"de-01","country":"Germany","country_code":"DE","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=DE#DE1","enabled":true},
-    {"id":"dk-01","country":"Denmark","country_code":"DK","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=DK#DK1","enabled":true},
-    {"id":"es-01","country":"Spain","country_code":"ES","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=ES#ES1","enabled":true},
-    {"id":"fi-01","country":"Finland","country_code":"FI","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=FI#FI1","enabled":true},
-    {"id":"gb-01","country":"United Kingdom","country_code":"GB","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=GB#GB1","enabled":true},
-    {"id":"id-01","country":"Indonesia","country_code":"ID","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=ID#ID1","enabled":true},
-    {"id":"ie-01","country":"Ireland","country_code":"IE","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=IE#IE1","enabled":true},
-    {"id":"in-01","country":"India","country_code":"IN","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=IN#IN1","enabled":true},
-    {"id":"it-01","country":"Italy","country_code":"IT","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=IT#IT1","enabled":true},
-    {"id":"jp-01","country":"Japan","country_code":"JP","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=JP#JP1","enabled":true},
-    {"id":"kr-01","country":"South Korea","country_code":"KR","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=KR#KR1","enabled":true},
-    {"id":"lt-01","country":"Lithuania","country_code":"LT","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=LT#LT1","enabled":true},
-    {"id":"nl-01","country":"Netherlands","country_code":"NL","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=NL#NL1","enabled":true},
-    {"id":"no-01","country":"Norway","country_code":"NO","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=NO#NO1","enabled":true},
-    {"id":"pl-01","country":"Poland","country_code":"PL","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=PL#PL1","enabled":true},
-    {"id":"ro-01","country":"Romania","country_code":"RO","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=RO#RO1","enabled":true},
-    {"id":"rs-01","country":"Serbia","country_code":"RS","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=RS#RS1","enabled":true},
-    {"id":"se-01","country":"Sweden","country_code":"SE","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=SE#SE1","enabled":true},
-    {"id":"sg-01","country":"Singapore","country_code":"SG","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=SG#SG1","enabled":true},
-    {"id":"us-01","country":"United States","country_code":"US","config":"aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=US#US1","enabled":true}
+    {
+      "id": "ir-wg",
+      "country": "Iran",
+      "country_code": "IR",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4#IR1",
+      "enabled": true
+    },
+    {
+      "id": "ir-masque",
+      "country": "Iran",
+      "country_code": "IR",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox#IR2",
+      "enabled": true
+    },
+    {
+      "id": "ir-gool",
+      "country": "Iran",
+      "country_code": "IR",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4#IR3",
+      "enabled": true
+    },
+    {
+      "id": "at-wg",
+      "country": "Austria",
+      "country_code": "AT",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AT#AT1",
+      "enabled": true
+    },
+    {
+      "id": "at-masque",
+      "country": "Austria",
+      "country_code": "AT",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=AT#AT2",
+      "enabled": true
+    },
+    {
+      "id": "at-gool",
+      "country": "Austria",
+      "country_code": "AT",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AT#AT3",
+      "enabled": true
+    },
+    {
+      "id": "au-wg",
+      "country": "Australia",
+      "country_code": "AU",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AU#AU1",
+      "enabled": true
+    },
+    {
+      "id": "au-masque",
+      "country": "Australia",
+      "country_code": "AU",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=AU#AU2",
+      "enabled": true
+    },
+    {
+      "id": "au-gool",
+      "country": "Australia",
+      "country_code": "AU",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=AU#AU3",
+      "enabled": true
+    },
+    {
+      "id": "be-wg",
+      "country": "Belgium",
+      "country_code": "BE",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=BE#BE1",
+      "enabled": true
+    },
+    {
+      "id": "be-masque",
+      "country": "Belgium",
+      "country_code": "BE",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=BE#BE2",
+      "enabled": true
+    },
+    {
+      "id": "be-gool",
+      "country": "Belgium",
+      "country_code": "BE",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=BE#BE3",
+      "enabled": true
+    },
+    {
+      "id": "br-wg",
+      "country": "Brazil",
+      "country_code": "BR",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=BR#BR1",
+      "enabled": true
+    },
+    {
+      "id": "br-masque",
+      "country": "Brazil",
+      "country_code": "BR",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=BR#BR2",
+      "enabled": true
+    },
+    {
+      "id": "br-gool",
+      "country": "Brazil",
+      "country_code": "BR",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=BR#BR3",
+      "enabled": true
+    },
+    {
+      "id": "ca-wg",
+      "country": "Canada",
+      "country_code": "CA",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=CA#CA1",
+      "enabled": true
+    },
+    {
+      "id": "ca-masque",
+      "country": "Canada",
+      "country_code": "CA",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=CA#CA2",
+      "enabled": true
+    },
+    {
+      "id": "ca-gool",
+      "country": "Canada",
+      "country_code": "CA",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=CA#CA3",
+      "enabled": true
+    },
+    {
+      "id": "ch-wg",
+      "country": "Switzerland",
+      "country_code": "CH",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=CH#CH1",
+      "enabled": true
+    },
+    {
+      "id": "ch-masque",
+      "country": "Switzerland",
+      "country_code": "CH",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=CH#CH2",
+      "enabled": true
+    },
+    {
+      "id": "ch-gool",
+      "country": "Switzerland",
+      "country_code": "CH",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=CH#CH3",
+      "enabled": true
+    },
+    {
+      "id": "cz-wg",
+      "country": "Czechia",
+      "country_code": "CZ",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=CZ#CZ1",
+      "enabled": true
+    },
+    {
+      "id": "cz-masque",
+      "country": "Czechia",
+      "country_code": "CZ",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=CZ#CZ2",
+      "enabled": true
+    },
+    {
+      "id": "cz-gool",
+      "country": "Czechia",
+      "country_code": "CZ",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=CZ#CZ3",
+      "enabled": true
+    },
+    {
+      "id": "de-wg",
+      "country": "Germany",
+      "country_code": "DE",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=DE#DE1",
+      "enabled": true
+    },
+    {
+      "id": "de-masque",
+      "country": "Germany",
+      "country_code": "DE",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=DE#DE2",
+      "enabled": true
+    },
+    {
+      "id": "de-gool",
+      "country": "Germany",
+      "country_code": "DE",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=DE#DE3",
+      "enabled": true
+    },
+    {
+      "id": "dk-wg",
+      "country": "Denmark",
+      "country_code": "DK",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=DK#DK1",
+      "enabled": true
+    },
+    {
+      "id": "dk-masque",
+      "country": "Denmark",
+      "country_code": "DK",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=DK#DK2",
+      "enabled": true
+    },
+    {
+      "id": "dk-gool",
+      "country": "Denmark",
+      "country_code": "DK",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=DK#DK3",
+      "enabled": true
+    },
+    {
+      "id": "es-wg",
+      "country": "Spain",
+      "country_code": "ES",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=ES#ES1",
+      "enabled": true
+    },
+    {
+      "id": "es-masque",
+      "country": "Spain",
+      "country_code": "ES",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=ES#ES2",
+      "enabled": true
+    },
+    {
+      "id": "es-gool",
+      "country": "Spain",
+      "country_code": "ES",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=ES#ES3",
+      "enabled": true
+    },
+    {
+      "id": "fi-wg",
+      "country": "Finland",
+      "country_code": "FI",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=FI#FI1",
+      "enabled": true
+    },
+    {
+      "id": "fi-masque",
+      "country": "Finland",
+      "country_code": "FI",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=FI#FI2",
+      "enabled": true
+    },
+    {
+      "id": "fi-gool",
+      "country": "Finland",
+      "country_code": "FI",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=FI#FI3",
+      "enabled": true
+    },
+    {
+      "id": "gb-wg",
+      "country": "United Kingdom",
+      "country_code": "GB",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=GB#GB1",
+      "enabled": true
+    },
+    {
+      "id": "gb-masque",
+      "country": "United Kingdom",
+      "country_code": "GB",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=GB#GB2",
+      "enabled": true
+    },
+    {
+      "id": "gb-gool",
+      "country": "United Kingdom",
+      "country_code": "GB",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=GB#GB3",
+      "enabled": true
+    },
+    {
+      "id": "id-wg",
+      "country": "Indonesia",
+      "country_code": "ID",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=ID#ID1",
+      "enabled": true
+    },
+    {
+      "id": "id-masque",
+      "country": "Indonesia",
+      "country_code": "ID",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=ID#ID2",
+      "enabled": true
+    },
+    {
+      "id": "id-gool",
+      "country": "Indonesia",
+      "country_code": "ID",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=ID#ID3",
+      "enabled": true
+    },
+    {
+      "id": "ie-wg",
+      "country": "Ireland",
+      "country_code": "IE",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=IE#IE1",
+      "enabled": true
+    },
+    {
+      "id": "ie-masque",
+      "country": "Ireland",
+      "country_code": "IE",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=IE#IE2",
+      "enabled": true
+    },
+    {
+      "id": "ie-gool",
+      "country": "Ireland",
+      "country_code": "IE",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=IE#IE3",
+      "enabled": true
+    },
+    {
+      "id": "in-wg",
+      "country": "India",
+      "country_code": "IN",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=IN#IN1",
+      "enabled": true
+    },
+    {
+      "id": "in-masque",
+      "country": "India",
+      "country_code": "IN",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=IN#IN2",
+      "enabled": true
+    },
+    {
+      "id": "in-gool",
+      "country": "India",
+      "country_code": "IN",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=IN#IN3",
+      "enabled": true
+    },
+    {
+      "id": "it-wg",
+      "country": "Italy",
+      "country_code": "IT",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=IT#IT1",
+      "enabled": true
+    },
+    {
+      "id": "it-masque",
+      "country": "Italy",
+      "country_code": "IT",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=IT#IT2",
+      "enabled": true
+    },
+    {
+      "id": "it-gool",
+      "country": "Italy",
+      "country_code": "IT",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=IT#IT3",
+      "enabled": true
+    },
+    {
+      "id": "jp-wg",
+      "country": "Japan",
+      "country_code": "JP",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=JP#JP1",
+      "enabled": true
+    },
+    {
+      "id": "jp-masque",
+      "country": "Japan",
+      "country_code": "JP",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=JP#JP2",
+      "enabled": true
+    },
+    {
+      "id": "jp-gool",
+      "country": "Japan",
+      "country_code": "JP",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=JP#JP3",
+      "enabled": true
+    },
+    {
+      "id": "kr-wg",
+      "country": "South Korea",
+      "country_code": "KR",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=KR#KR1",
+      "enabled": true
+    },
+    {
+      "id": "kr-masque",
+      "country": "South Korea",
+      "country_code": "KR",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=KR#KR2",
+      "enabled": true
+    },
+    {
+      "id": "kr-gool",
+      "country": "South Korea",
+      "country_code": "KR",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=KR#KR3",
+      "enabled": true
+    },
+    {
+      "id": "lt-wg",
+      "country": "Lithuania",
+      "country_code": "LT",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=LT#LT1",
+      "enabled": true
+    },
+    {
+      "id": "lt-masque",
+      "country": "Lithuania",
+      "country_code": "LT",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=LT#LT2",
+      "enabled": true
+    },
+    {
+      "id": "lt-gool",
+      "country": "Lithuania",
+      "country_code": "LT",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=LT#LT3",
+      "enabled": true
+    },
+    {
+      "id": "nl-wg",
+      "country": "Netherlands",
+      "country_code": "NL",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=NL#NL1",
+      "enabled": true
+    },
+    {
+      "id": "nl-masque",
+      "country": "Netherlands",
+      "country_code": "NL",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=NL#NL2",
+      "enabled": true
+    },
+    {
+      "id": "nl-gool",
+      "country": "Netherlands",
+      "country_code": "NL",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=NL#NL3",
+      "enabled": true
+    },
+    {
+      "id": "no-wg",
+      "country": "Norway",
+      "country_code": "NO",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=NO#NO1",
+      "enabled": true
+    },
+    {
+      "id": "no-masque",
+      "country": "Norway",
+      "country_code": "NO",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=NO#NO2",
+      "enabled": true
+    },
+    {
+      "id": "no-gool",
+      "country": "Norway",
+      "country_code": "NO",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=NO#NO3",
+      "enabled": true
+    },
+    {
+      "id": "pl-wg",
+      "country": "Poland",
+      "country_code": "PL",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=PL#PL1",
+      "enabled": true
+    },
+    {
+      "id": "pl-masque",
+      "country": "Poland",
+      "country_code": "PL",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=PL#PL2",
+      "enabled": true
+    },
+    {
+      "id": "pl-gool",
+      "country": "Poland",
+      "country_code": "PL",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=PL#PL3",
+      "enabled": true
+    },
+    {
+      "id": "ro-wg",
+      "country": "Romania",
+      "country_code": "RO",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=RO#RO1",
+      "enabled": true
+    },
+    {
+      "id": "ro-masque",
+      "country": "Romania",
+      "country_code": "RO",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=RO#RO2",
+      "enabled": true
+    },
+    {
+      "id": "ro-gool",
+      "country": "Romania",
+      "country_code": "RO",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=RO#RO3",
+      "enabled": true
+    },
+    {
+      "id": "rs-wg",
+      "country": "Serbia",
+      "country_code": "RS",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=RS#RS1",
+      "enabled": true
+    },
+    {
+      "id": "rs-masque",
+      "country": "Serbia",
+      "country_code": "RS",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=RS#RS2",
+      "enabled": true
+    },
+    {
+      "id": "rs-gool",
+      "country": "Serbia",
+      "country_code": "RS",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=RS#RS3",
+      "enabled": true
+    },
+    {
+      "id": "se-wg",
+      "country": "Sweden",
+      "country_code": "SE",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=SE#SE1",
+      "enabled": true
+    },
+    {
+      "id": "se-masque",
+      "country": "Sweden",
+      "country_code": "SE",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=SE#SE2",
+      "enabled": true
+    },
+    {
+      "id": "se-gool",
+      "country": "Sweden",
+      "country_code": "SE",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=SE#SE3",
+      "enabled": true
+    },
+    {
+      "id": "sg-wg",
+      "country": "Singapore",
+      "country_code": "SG",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=SG#SG1",
+      "enabled": true
+    },
+    {
+      "id": "sg-masque",
+      "country": "Singapore",
+      "country_code": "SG",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=SG#SG2",
+      "enabled": true
+    },
+    {
+      "id": "sg-gool",
+      "country": "Singapore",
+      "country_code": "SG",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=SG#SG3",
+      "enabled": true
+    },
+    {
+      "id": "us-wg",
+      "country": "United States",
+      "country_code": "US",
+      "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=US#US1",
+      "enabled": true
+    },
+    {
+      "id": "us-masque",
+      "country": "United States",
+      "country_code": "US",
+      "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto&region=US#US2",
+      "enabled": true
+    },
+    {
+      "id": "us-gool",
+      "country": "United States",
+      "country_code": "US",
+      "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto&region=US#US3",
+      "enabled": true
+    }
   ]
 }
