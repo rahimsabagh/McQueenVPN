@@ -1,25 +1,25 @@
 
 {
-  "version": 3,
-  "updated_at": "2026-11-14T15:19:04.591Z",
+  "version": 4,
+  "updated_at": "2026-11-14T15:26:03.347Z",
   "servers": [
     {
       "id": "ir-wg",
-      "country": "Iran",
+      "country": "ایران",
       "country_code": "IR",
       "config": "aether://?protocol=wg&scan=balanced&ip=v4#IR1",
       "enabled": true
     },
     {
       "id": "ir-masque",
-      "country": "Iran",
+      "country": "ایران",
       "country_code": "IR",
       "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox#IR2",
       "enabled": true
     },
     {
       "id": "ir-gool",
-      "country": "Iran",
+      "country": "ایران",
       "country_code": "IR",
       "config": "aether://?protocol=gool&scan=balanced&ip=v4#IR3",
       "enabled": true
