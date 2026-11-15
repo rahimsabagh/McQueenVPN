@@ -397,6 +397,7 @@ object CoreServiceManager {
 
     /**
      * Queries all outbound traffic statistics from Xray.
+     * Go side format: `tag,direction,value;tag,direction,value;`
      */
     fun getAllOutboundTraffic(): List<OutboundTrafficStat> {
         if (!isRunning()) {
@@ -408,21 +409,35 @@ object CoreServiceManager {
             LogUtil.e(AppConfig.TAG, "Failed to query all outbound traffic stats", e)
             return emptyList()
         }
+        return parseOutboundTrafficStats(raw)
+    }
+
+    internal fun parseOutboundTrafficStats(raw: String): List<OutboundTrafficStat> {
         if (raw.isBlank()) {
             return emptyList()
         }
-        return raw.lineSequence()
+        return raw.split(';', '\n')
+            .asSequence()
             .map { it.trim() }
             .filter { it.isNotEmpty() }
-            .mapNotNull { line ->
-                val parts = line.split('\t')
+            .mapNotNull { entry ->
+                val parts = if (entry.contains('\t')) {
+                    entry.split('\t', limit = 3)
+                } else {
+                    entry.split(',', limit = 3)
+                }
                 if (parts.size != 3) {
                     return@mapNotNull null
                 }
-                val value = parts[2].toLongOrNull() ?: return@mapNotNull null
+                val tag = parts[0].trim()
+                val direction = parts[1].trim()
+                val value = parts[2].trim().toLongOrNull() ?: return@mapNotNull null
+                if (tag.isEmpty() || direction.isEmpty()) {
+                    return@mapNotNull null
+                }
                 OutboundTrafficStat(
-                    tag = parts[0],
-                    direction = parts[1],
+                    tag = tag,
+                    direction = direction,
                     value = value.coerceAtLeast(0L),
                 )
             }

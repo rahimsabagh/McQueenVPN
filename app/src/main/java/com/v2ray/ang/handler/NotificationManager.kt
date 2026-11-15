@@ -45,9 +45,12 @@ object NotificationManager {
     private var mBuilder: NotificationCompat.Builder? = null
     @Volatile
     private var isScreenInteractive: Boolean = true
+    @Volatile
+    private var lastNotifiedText: String? = null
     private var mNotificationManager: android.app.NotificationManager? = null
 
     fun onSessionStart(sessionStartMs: Long) {
+        lastNotifiedText = null
         trafficTracker.onSessionStart(sessionStartMs)
     }
 
@@ -61,6 +64,7 @@ object NotificationManager {
 
     fun onScreenOn() {
         isScreenInteractive = true
+        lastNotifiedText = null
         val service = getService() ?: return
         val snapshot = trafficTracker.currentSnapshot(CoreServiceManager.getSessionStartTimeMs())
         MessageHelper.sendMsg2UI(service, AppConfig.MSG_TRAFFIC_STATS, snapshot)
@@ -83,13 +87,12 @@ object NotificationManager {
      */
     @Synchronized
     fun startSpeedNotification(currentConfig: ProfileItem?) {
-        if (!MmkvManager.decodeSettingsBool(AppConfig.PREF_SPEED_ENABLED, AppConfig.DEFAULT_SPEED_ENABLED)) return
-        if (speedNotificationJob?.isActive == true || !CoreServiceManager.isRunning()) return
+        if (speedNotificationJob?.isActive == true || !CoreServiceManager.isServiceRunning()) return
 
         val outboundLabel = currentConfig?.remarks?.takeIf { it.isNotBlank() } ?: AppConfig.TAG_PROXY
 
         speedNotificationJob = notificationScope.launch {
-            while (isActive && CoreServiceManager.isRunning()) {
+            while (isActive && CoreServiceManager.isServiceRunning()) {
                 val sessionStartMs = CoreServiceManager.getSessionStartTimeMs()
                 val sampleResult = trafficTracker.sample(sessionStartMs)
 
@@ -101,7 +104,11 @@ object NotificationManager {
                     )
                 }
 
-                if (isScreenInteractive) {
+                val speedNotificationEnabled = MmkvManager.decodeSettingsBool(
+                    AppConfig.PREF_SPEED_ENABLED,
+                    AppConfig.DEFAULT_SPEED_ENABLED
+                )
+                if (isScreenInteractive && speedNotificationEnabled) {
                     val text = StringBuilder()
                     text.append(
                         "• $outboundLabel ↑ ${sampleResult.proxyUplinkBps.toSpeedString()} ↓ ${sampleResult.proxyDownlinkBps.toSpeedString()}\n"
@@ -118,11 +125,15 @@ object NotificationManager {
                         )
                     }
 
-                    updateNotification(
-                        text.toString().trim(),
-                        sampleResult.proxyUplinkBps,
-                        sampleResult.proxyDownlinkBps
-                    )
+                    val renderedText = text.toString().trim()
+                    if (renderedText != lastNotifiedText) {
+                        lastNotifiedText = renderedText
+                        updateNotification(
+                            renderedText,
+                            sampleResult.proxyUplinkBps,
+                            sampleResult.proxyDownlinkBps
+                        )
+                    }
                 }
 
                 delay(SPEED_UPDATE_INTERVAL_MS)
@@ -183,6 +194,7 @@ object NotificationManager {
             )
 
         mBuilder = builder
+        lastNotifiedText = null
         val notification = builder.build()
         val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
@@ -199,6 +211,7 @@ object NotificationManager {
     fun cancelNotification(explicitService: Service? = null) {
         val service = explicitService ?: getService()
         mBuilder = null
+        lastNotifiedText = null
         stopSpeedNotification()
         trafficTracker.onSessionStop()
 
@@ -230,6 +243,7 @@ object NotificationManager {
         speedNotificationJob?.let {
             it.cancel()
             speedNotificationJob = null
+            lastNotifiedText = null
             updateNotification(null, 0, 0)
         }
     }

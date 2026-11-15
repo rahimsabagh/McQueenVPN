@@ -865,6 +865,7 @@ class McQueenViewModel(application: Application) : AndroidViewModel(application)
                     statusDetail = "",
                 )
             }
+            MessageHelper.sendMsg2Service(getApplication(), AppConfig.MSG_REGISTER_CLIENT, "")
         } else {
             LogUtil.w(AppConfig.TAG, "Tunnel verification failed ($firstLine, delayMs=$delayMs); rotating candidate")
             MessageHelper.sendMsg2Service(getApplication(), AppConfig.MSG_STATE_STOP, "")

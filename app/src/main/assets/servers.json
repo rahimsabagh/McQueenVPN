@@ -1,46 +1,46 @@
 
 {
-  "version": 4,
-  "updated_at": "2026-11-14T15:26:03.347Z",
+  "version": 1,
+  "updated_at": "2026-11-15",
   "servers": [
     {
       "id": "ir-wg",
-      "country": ".Auto select (fastest, iran ip)",
+      "country": ".Auto select",
       "country_code": "IR",
       "config": "aether://?protocol=wg&scan=balanced&ip=v4#IR1",
       "enabled": true
     },
     {
       "id": "ir-masque",
-      "country": ".Auto select (fastest, iran ip)",
+      "country": ".Auto select",
       "country_code": "IR",
       "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox#IR2",
       "enabled": true
     },
     {
       "id": "ir-gool",
-      "country": ".Auto select (fastest, iran ip)",
+      "country": ".Auto select",
       "country_code": "IR",
       "config": "aether://?protocol=gool&scan=balanced&ip=v4#IR3",
       "enabled": true
     },
     {
       "id": "auto-wg",
-      "country": ".Auto select (fast, not iran ip)",
+      "country": ".Auto select",
       "country_code": "UN",
       "config": "aether://?protocol=wg&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto#UN1",
       "enabled": true
     },
     {
       "id": "auto-masque",
-      "country": ".Auto select (fast, not iran ip)",
+      "country": ".Auto select",
       "country_code": "UN",
       "config": "aether://?protocol=masque&scan=balanced&ip=v4&transport=h2&fingerprint=firefox&psiphon=chain&psiphon_mode=auto#UN2",
       "enabled": true
     },
     {
       "id": "auto-gool",
-      "country": ".Auto select (fast, not iran ip)",
+      "country": ".Auto select",
       "country_code": "UN",
       "config": "aether://?protocol=gool&scan=balanced&ip=v4&psiphon=chain&psiphon_mode=auto#UN3",
       "enabled": true

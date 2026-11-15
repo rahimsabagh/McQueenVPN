@@ -559,6 +559,9 @@ private fun ConnectButtonHeroGlyph(
         return
     }
 
+    val shieldPath = remember { Path() }
+    val checkPath = remember { Path() }
+
     Canvas(modifier = modifier) {
         val s = size.minDimension / 24f
         when (state) {
@@ -624,7 +627,8 @@ private fun ConnectButtonHeroGlyph(
                     join = StrokeJoin.Round,
                 )
                 // <path d="M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6z"/>
-                val shieldPath = Path().apply {
+                shieldPath.rewind()
+                shieldPath.apply {
                     moveTo(12f * s, 3f * s)
                     lineTo(20f * s, 6f * s)
                     lineTo(20f * s, 12f * s)
@@ -647,7 +651,8 @@ private fun ConnectButtonHeroGlyph(
                     style = stroke,
                 )
                 // <path d="M8.5 12l2.5 2.5 4.5-5"/>
-                val checkPath = Path().apply {
+                checkPath.rewind()
+                checkPath.apply {
                     moveTo(8.5f * s, 12f * s)
                     lineTo(11f * s, 14.5f * s)
                     lineTo(15.5f * s, 9.5f * s)

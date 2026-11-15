@@ -139,6 +139,9 @@ fun McQueenBrandMark(
     val mFillColor = if (isDark) Color(0xFFD9DEDF) else MaterialTheme.colorScheme.onSurface
     val swooshFillColor = Color(0xFF8B1A1F)
 
+    val mPath = remember { Path() }
+    val swooshPath = remember { Path() }
+
     Surface(
         modifier = modifier.size(44.dp),
         shape = RoundedCornerShape(14.dp),
@@ -162,7 +165,8 @@ fun McQueenBrandMark(
                 fun py(y: Float): Float = (y - oy) * sy
 
                 // <path d="M237 666L417 358L512 517L606 358L697 512Q660 518 630 528L607 489L570 552Q522 572 481 598L416 490L315 666Z" fill="#d9dedf"/>
-                val mPath = Path().apply {
+                mPath.rewind()
+                mPath.apply {
                     moveTo(px(237f), py(666f))
                     lineTo(px(417f), py(358f))
                     lineTo(px(512f), py(517f))
@@ -179,7 +183,8 @@ fun McQueenBrandMark(
                 drawPath(path = mPath, color = mFillColor)
 
                 // <path d="M418 666C520 585 650 540 787 519C690 546 585 600 520 666Z" fill="#8b1a1f"/>
-                val swooshPath = Path().apply {
+                swooshPath.rewind()
+                swooshPath.apply {
                     moveTo(px(418f), py(666f))
                     cubicTo(
                         px(520f), py(585f),
@@ -828,6 +833,8 @@ private fun StatusBadgePill(
                     modifier = Modifier.size(16.dp)
                 )
             } else {
+                val shieldPath = remember { Path() }
+                val checkPath = remember { Path() }
                 Canvas(modifier = Modifier.size(16.dp)) {
                     val s = size.minDimension / 24f
                     val stroke = Stroke(
@@ -853,7 +860,8 @@ private fun StatusBadgePill(
                         ConnectButtonState.Disconnected,
                         ConnectButtonState.Connected -> {
                             // <path d="M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6z"/>
-                            val shieldPath = Path().apply {
+                            shieldPath.rewind()
+                            shieldPath.apply {
                                 moveTo(12f * s, 3f * s)
                                 lineTo(20f * s, 6f * s)
                                 lineTo(20f * s, 12f * s)
@@ -866,7 +874,8 @@ private fun StatusBadgePill(
 
                             if (buttonState == ConnectButtonState.Connected) {
                                 // <path d="M8.5 12l2.5 2.5 4.5-5"/>
-                                val checkPath = Path().apply {
+                                checkPath.rewind()
+                                checkPath.apply {
                                     moveTo(8.5f * s, 12f * s)
                                     lineTo(11f * s, 14.5f * s)
                                     lineTo(15.5f * s, 9.5f * s)

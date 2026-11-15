@@ -239,7 +239,7 @@ class McQueenServerConfigAndMockFetchTest {
         assertEquals(0, parsed.skippedCount)
 
         val topCodes = parsed.countries.take(2).map { it.countryCode }
-        assertEquals(listOf("UN", "IR"), topCodes)
+        assertEquals(listOf("IR", "UN"), topCodes)
         assertTrue(parsed.countries.all { it.availableServerCount == 3 })
 
         val guid1 = repository.deterministicServerGuid("DE", "de-wg")

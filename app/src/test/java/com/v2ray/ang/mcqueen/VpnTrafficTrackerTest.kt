@@ -142,4 +142,30 @@ class VpnTrafficTrackerTest {
         assertEquals(10_000L, wakeSample.sessionUplinkBytes)
         assertEquals(50_000L, wakeSample.sessionDownlinkBytes)
     }
+
+    @Test
+    fun `parses Go semicolon and comma outbound traffic payload and feeds VpnTrafficTracker`() {
+        var nowMs = 1_000L
+        var rawPayload = ""
+        val tracker = VpnTrafficTracker(
+            source = { com.v2ray.ang.core.CoreServiceManager.parseOutboundTrafficStats(rawPayload) },
+            monotonicClockMs = { nowMs }
+        )
+
+        tracker.onSessionStart(sessionStartMs = 500_000L)
+
+        nowMs = 2_000L
+        rawPayload = "proxy,uplink,2048;proxy,downlink,8192;direct,uplink,512;direct,downlink,1024;exit-node,downlink,99999;block,uplink,88888;"
+        val sample = tracker.sample()
+
+        assertEquals(2_048L, sample.proxyUplinkBps)
+        assertEquals(8_192L, sample.proxyDownlinkBps)
+        assertEquals(512L, sample.directUplinkBps)
+        assertEquals(1_024L, sample.directDownlinkBps)
+        assertEquals(2_560L, sample.snapshot.uplinkBps)
+        assertEquals(9_216L, sample.snapshot.downlinkBps)
+        assertEquals(2_560L, sample.snapshot.sessionUplinkBytes)
+        assertEquals(9_216L, sample.snapshot.sessionDownlinkBytes)
+        assertEquals(11_776L, sample.snapshot.sessionTotalBytes)
+    }
 }
