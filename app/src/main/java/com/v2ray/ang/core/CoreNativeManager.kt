@@ -1,7 +1,10 @@
 package com.v2ray.ang.core
 
 import android.content.Context
+import android.system.Os
+import android.system.OsConstants
 import com.v2ray.ang.AppConfig
+import com.v2ray.ang.handler.SettingsManager
 import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
 import go.Seq
@@ -18,28 +21,61 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object CoreNativeManager {
     private val initialized = AtomicBoolean(false)
+    private val initLock = Any()
 
     /**
      * Initialize V2Ray core environment.
      * This method is thread-safe and ensures initialization happens only once.
-     * Subsequent calls will be ignored silently.
-     *
+     * Subsequent calls will wait until any in-flight initialization finishes and then return.
      */
     fun initCoreEnv(context: Context?) {
-        if (initialized.compareAndSet(false, true)) {
+        if (initialized.get()) {
+            LogUtil.d(AppConfig.TAG, "V2Ray core environment already initialized, skipping")
+            return
+        }
+        synchronized(initLock) {
+            if (initialized.get()) {
+                LogUtil.d(AppConfig.TAG, "V2Ray core environment already initialized, skipping")
+                return
+            }
             try {
-                Seq.setContext(context?.applicationContext)
+                val appContext = context?.applicationContext
+                if (appContext != null) {
+                    SettingsManager.initAssets(appContext, appContext.assets)
+                }
+                Seq.setContext(appContext)
                 val assetPath = Utils.userAssetPath(context)
                 val deviceId = Utils.getDeviceIdForXUDPBaseKey()
                 Libv2ray.initCoreEnv(assetPath, deviceId)
+                suppressGomobileStderrHijack()
+                initialized.set(true)
                 LogUtil.i(AppConfig.TAG, "V2Ray core environment initialized successfully")
             } catch (e: Exception) {
                 LogUtil.e(AppConfig.TAG, "Failed to initialize V2Ray core environment", e)
                 initialized.set(false)
                 throw e
             }
-        } else {
-            LogUtil.d(AppConfig.TAG, "V2Ray core environment already initialized, skipping")
+        }
+    }
+
+    /**
+     * Workaround for gomobile's `mobileinit` redirecting process STDERR_FILENO (fd 2)
+     * to a pipe logged at ANDROID_LOG_ERROR with tag "GoLog". On Android emulators,
+     * hwui / libGLESv2_emulation writes shader attribute bindings ("s_glBindAttribLocation...")
+     * to stderr (fd 2), causing spurious E/GoLog error entries in logcat.
+     * Redirecting fd 2 to /dev/null after libgojni.so loads prevents C/GL stderr noise
+     * from being promoted to E/GoLog while preserving Xray-core's own log callbacks.
+     */
+    private fun suppressGomobileStderrHijack() {
+        try {
+            val devNull = Os.open("/dev/null", OsConstants.O_WRONLY, 0)
+            try {
+                Os.dup2(devNull, OsConstants.STDERR_FILENO)
+            } finally {
+                Os.close(devNull)
+            }
+        } catch (t: Throwable) {
+            LogUtil.d(AppConfig.TAG, "Skipped STDERR_FILENO redirect: ${t.message}")
         }
     }
 

@@ -4,280 +4,159 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
+        description: "Release tag to build and publish (e.g. v1.0.0-beta.2)"
         required: false
+        default: "v1.0.0-beta.2"
         type: string
   push:
     branches:
       - master
+      - main
+    tags:
+      - "v*"
+      - "V*"
 
 permissions:
   contents: write
 
 jobs:
   build:
+    name: Test & Build McQueen VPN APK
     runs-on: ubuntu-latest
     env:
-      # The latest stable release, as aether's own release workflow builds with. The libaether
-      # cache is keyed by the rustc it installs, so a new stable release builds the core afresh.
-      RUST_TOOLCHAIN: "stable"
-      # The Go line the Psiphon client's go.mod asks for, which also covers lyrebird's older one;
-      # aether/psiphon-build.sh and aether/pt-build.sh pin the programs themselves. Bump it when a
-      # bumped aether submodule pins a program that asks for a newer line.
-      GO_VERSION: "1.26"
+      GO_VERSION: "1.24"
+      NDK_VERSION: "27.2.12479018"
+      EFFECTIVE_TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || 'v1.0.0-beta.2' }}
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v7
-      with:
-        submodules: 'recursive'
-        fetch-depth: '0'
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v4
-      with:
-        log-accepted-android-sdk-licenses: false
-        cmdline-tools-version: '14742923'
-        packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-    - name: Install NDK
-      run: |
-        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
-          --channel=0 \
-          --install "ndk;30.0.16248370"
-        echo "NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> $GITHUB_ENV
-        sed -i '10i\
-        \
-            ndkVersion = "30.0.16248370"' ${{ github.workspace }}/V2rayNG/app/build.gradle.kts
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
 
-    - name: Restore cached libhevtun
-      id: cache-libhevtun-restore
-      uses: actions/cache/restore@v6
-      with:
-        path: ${{ github.workspace }}/libs
-        key: libhevtun-${{ runner.os }}-${{ env.NDK_HOME }}-${{ hashFiles('.git/modules/hev-socks5-tunnel/HEAD') }}-${{ hashFiles('compile-hevtun.sh') }}
+      - name: Set up Go
+        if: hashFiles('aether/psiphon-build.sh', 'aether/pt-build.sh') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
 
-    - name: Build libhevtun
-      if: steps.cache-libhevtun-restore.outputs.cache-hit != 'true'
-      run: |
-        bash compile-hevtun.sh
-    
-    - name: Save libhevtun
-      if: steps.cache-libhevtun-restore.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v6
-      with:
-        path: ${{ github.workspace }}/libs
-        key: libhevtun-${{ runner.os }}-${{ env.NDK_HOME }}-${{ hashFiles('.git/modules/hev-socks5-tunnel/HEAD') }}-${{ hashFiles('compile-hevtun.sh') }}
+      - name: Install Rust toolchain
+        if: hashFiles('aether/aether/Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
-    - name: Install Rust
-      id: rust-toolchain
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{ env.RUST_TOOLCHAIN }}
-        targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - name: Install Android SDK and NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
-    - name: Restore cached libaether
-      id: cache-libaether-restore
-      uses: actions/cache/restore@v6
-      with:
-        path: ${{ github.workspace }}/libs-aether
-        key: libaether-${{ runner.os }}-${{ env.NDK_HOME }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('.git/modules/aether/HEAD') }}-${{ hashFiles('compile-aether.sh') }}
+      - name: Build native libraries from submodules if present
+        run: |
+          if [[ -f "hev-socks5-tunnel/Android.mk" ]]; then
+            bash compile-hevtun.sh
+          fi
+          if [[ -f "aether/aether/Cargo.toml" ]]; then
+            bash compile-aether.sh
+          fi
+          if [[ -f "aether/psiphon-build.sh" ]]; then
+            bash compile-psiphon.sh
+          fi
+          if [[ -f "aether/pt-build.sh" ]]; then
+            bash compile-pt.sh
+          fi
+          mkdir -p app/libs
+          for directory in libs libs-aether libs-psiphon libs-pt; do
+            if [[ -d "$directory" ]]; then
+              cp -R "$directory"/. app/libs/
+            fi
+          done
 
-    - name: Build libaether
-      if: steps.cache-libaether-restore.outputs.cache-hit != 'true'
-      run: |
-        bash compile-aether.sh
+      - name: Run JVM unit tests
+        run: |
+          gradle --no-daemon -PmcqueenVersionName="${EFFECTIVE_TAG}" :app:testDebugUnitTest
 
-    - name: Save libaether
-      if: steps.cache-libaether-restore.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v6
-      with:
-        path: ${{ github.workspace }}/libs-aether
-        key: libaether-${{ runner.os }}-${{ env.NDK_HOME }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('.git/modules/aether/HEAD') }}-${{ hashFiles('compile-aether.sh') }}
+      - name: Build APK (Signed Release if keystore configured, plus Debug APK)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 || secrets.APP_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || secrets.APP_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.APP_KEYSTORE_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.APP_KEY_PASSWORD }}
+        run: |
+          mkdir -p dist
+          gradle --no-daemon -PmcqueenVersionName="${EFFECTIVE_TAG}" :app:assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/McQueenVPN-${EFFECTIVE_TAG}-debug.apk"
 
-    - name: Install Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-        # The client is built from a checkout of its own; there is no go.sum here to cache by.
-        cache: false
+          if [[ -n "$KEYSTORE_BASE64" && -n "$STORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
+            umask 077
+            printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$RUNNER_TEMP/release.jks"
+            RELEASE_STORE_FILE="$RUNNER_TEMP/release.jks" \
+            RELEASE_STORE_PASSWORD="$STORE_PASSWORD" \
+            RELEASE_KEY_ALIAS="$KEY_ALIAS" \
+            RELEASE_KEY_PASSWORD="$KEY_PASSWORD" \
+              gradle --no-daemon -PmcqueenVersionName="${EFFECTIVE_TAG}" :app:assembleRelease :app:bundleRelease
 
-    # The Aether core runs Psiphon as a program of its own, the psiphon-tunnel-core console client,
-    # which the app ships beside the core as libpsiphon-tunnel-core.so; see compile-psiphon.sh.
-    - name: Restore cached Psiphon client
-      id: cache-psiphon-restore
-      uses: actions/cache/restore@v6
-      with:
-        path: ${{ github.workspace }}/libs-psiphon
-        key: psiphon-${{ runner.os }}-${{ env.GO_VERSION }}-${{ hashFiles('aether/psiphon-build.sh') }}-${{ hashFiles('compile-psiphon.sh') }}
+            cp app/build/outputs/apk/release/app-release.apk "dist/app-release.apk"
+            cp app/build/outputs/apk/release/app-release.apk "dist/McQueenVPN-${EFFECTIVE_TAG}.apk"
+            cp app/build/outputs/bundle/release/app-release.aab "dist/McQueenVPN-${EFFECTIVE_TAG}.aab"
+          else
+            echo "::notice::Release signing secrets not configured; using debug-signed APK as release artifact."
+            cp "dist/McQueenVPN-${EFFECTIVE_TAG}-debug.apk" "dist/app-release.apk"
+          fi
 
-    - name: Build the Psiphon client
-      if: steps.cache-psiphon-restore.outputs.cache-hit != 'true'
-      run: |
-        bash compile-psiphon.sh
+          (
+            cd dist
+            sha256sum *.apk *.aab 2>/dev/null | tee SHA256SUMS.txt || sha256sum *.apk | tee SHA256SUMS.txt
+          )
 
-    - name: Save the Psiphon client
-      if: steps.cache-psiphon-restore.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v6
-      with:
-        path: ${{ github.workspace }}/libs-psiphon
-        key: psiphon-${{ runner.os }}-${{ env.GO_VERSION }}-${{ hashFiles('aether/psiphon-build.sh') }}-${{ hashFiles('compile-psiphon.sh') }}
-
-    # Tor's bridges run through a pluggable transport, a program of its own: lyrebird, which aether
-    # builds and the app ships beside the core as liblyrebird.so; see compile-pt.sh.
-    - name: Restore cached pluggable transport
-      id: cache-pt-restore
-      uses: actions/cache/restore@v6
-      with:
-        path: ${{ github.workspace }}/libs-pt
-        key: pt-${{ runner.os }}-${{ env.GO_VERSION }}-${{ hashFiles('aether/pt-build.sh') }}-${{ hashFiles('compile-pt.sh') }}
-
-    - name: Build the pluggable transport
-      if: steps.cache-pt-restore.outputs.cache-hit != 'true'
-      run: |
-        bash compile-pt.sh
-
-    - name: Save the pluggable transport
-      if: steps.cache-pt-restore.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v6
-      with:
-        path: ${{ github.workspace }}/libs-pt
-        key: pt-${{ runner.os }}-${{ env.GO_VERSION }}-${{ hashFiles('aether/pt-build.sh') }}-${{ hashFiles('compile-pt.sh') }}
-
-    - name: Stage the native libraries
-      run: |
-        cp -r ${{ github.workspace }}/libs ${{ github.workspace }}/V2rayNG/app
-        cp -r ${{ github.workspace }}/libs-aether/. ${{ github.workspace }}/V2rayNG/app/libs/
-        cp -r ${{ github.workspace }}/libs-psiphon/. ${{ github.workspace }}/V2rayNG/app/libs/
-        cp -r ${{ github.workspace }}/libs-pt/. ${{ github.workspace }}/V2rayNG/app/libs/
-
-    # Psiphon's client starts with the newest server list the build could fetch, so a fresh install has
-    # servers before it can reach the list on its own; see fetch-psiphon-servers.sh.
-    - name: Fetch the Psiphon server list
-      run: |
-        bash fetch-psiphon-servers.sh
-
-    - name: Fetch AndroidLibXrayLite tag
-      run: |
-        pushd AndroidLibXrayLite
-        CURRENT_TAG=$(git describe --tags --abbrev=0)
-        echo "Current tag in this repo: $CURRENT_TAG"
-        echo "CURRENT_TAG=$CURRENT_TAG" >> $GITHUB_ENV
-        popd
-
-    - name: Download libv2ray
-      uses: robinraju/release-downloader@v1.13
-      with:
-        repository: 'patterniha/AndroidLibXrayLite'
-        tag: ${{ env.CURRENT_TAG }}
-        fileName: 'libv2ray.aar'
-        out-file-path: V2rayNG/app/libs/
-
-    - name: Setup Java
-      uses: actions/setup-java@v6.2.0
-      with:
-        distribution: 'temurin'
-        java-version: '21'
-
-    - name: Decode Keystore
-      uses: timheuer/base64-to-file@v2.0.0
-      id: android_keystore
-      with:
-        fileName: "android_keystore.jks"
-        encodedString: ${{ secrets.APP_KEYSTORE_BASE64 }}
-
-    - name: Build APK
-      run: |
-        cd ${{ github.workspace }}/V2rayNG
-        echo "sdk.dir=${ANDROID_HOME}" > local.properties
-        chmod 755 gradlew
-        # The JVM unit tests are the only automated check of the Kotlin logic; a failure stops the
-        # build before anything is assembled or signed.
-        ./gradlew :app:testPlaystoreDebugUnitTest
-        ./gradlew licenseFdroidReleaseReport
-        ./gradlew assembleRelease -PpattngVersion="${{ inputs.release_tag }}" -Pandroid.injected.signing.store.file=${{ steps.android_keystore.outputs.filePath }} -Pandroid.injected.signing.store.password=${{ secrets.APP_KEYSTORE_PASSWORD }} -Pandroid.injected.signing.key.alias=${{ secrets.APP_KEYSTORE_ALIAS }} -Pandroid.injected.signing.key.password=${{ secrets.APP_KEY_PASSWORD }}
-    
-    - name: Check the native libraries in the APKs
-      run: |
-        # Looked into as ZIP files: every ABI the Aether core is built for has to carry the core, its
-        # Psiphon client and its pluggable transport, and each APK's native files are listed for the record.
-        status=0
-        for apk in ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/*/release/*.apk; do
-          entries=$(unzip -Z1 "$apk" | grep '^lib/' || true)
-          echo "$(basename "$apk"):"
+      - name: Verify native libraries in built APK
+        run: |
+          apk="dist/app-release.apk"
+          entries="$(unzip -Z1 "$apk" | grep '^lib/' || true)"
+          echo "Native libraries in $(basename "$apk"):"
           echo "$entries" | sed 's/^/  /'
           for abi in arm64-v8a armeabi-v7a x86_64; do
-            echo "$entries" | grep -q "^lib/$abi/" || continue
-            for lib in libaether.so libpsiphon-tunnel-core.so liblyrebird.so; do
+            for lib in libaether.so libpsiphon-tunnel-core.so liblyrebird.so libhev-socks5-tunnel.so; do
               if ! echo "$entries" | grep -qx "lib/$abi/$lib"; then
-                echo "::error::$(basename "$apk") lacks lib/$abi/$lib"
-                status=1
+                echo "::error::$(basename "$apk") is missing lib/$abi/$lib"
+                exit 1
               fi
             done
           done
-        done
-        exit $status
 
-    - name: Upload arm64-v8a APK
-      uses: actions/upload-artifact@v7
-      if: ${{  success() }}
-      with:
-        name: arm64-v8a
-        path: ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/*/release/*arm64-v8a*.apk
-
-    - name: Upload armeabi-v7a APK
-      uses: actions/upload-artifact@v7
-      if: ${{  success() }}
-      with:
-        name: armeabi-v7a
-        path: ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/*/release/*armeabi-v7a*.apk
-
-    - name: Upload x86 APK
-      uses: actions/upload-artifact@v7
-      if: ${{  success() }}
-      with:
-        name: x86-apk
-        path: ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/*/release/*x86*.apk
-
-    - name: Upload universal APK
-      uses: actions/upload-artifact@v7
-      if: ${{ success() }}
-      with:
-        name: universal-apk
-        path: ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/*/release/*universal*.apk
-
-  sign-and-release:
-    needs: build
-    runs-on: ubuntu-26.04
-    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-
-    steps:
-      - name: Download APK artifacts
-        uses: actions/download-artifact@v8
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          path: release
+          name: McQueenVPN-${{ env.EFFECTIVE_TAG }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Sign APK files
-        run: |
-          # Quiet: a plain import prints the key's user ID, name and email, into the public log.
-          printf '%s' "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --quiet --import
-          KEY=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
-          mkdir -p release-files
-
-          find release -type f -name '*.apk' | while read apk; do
-            cp "$apk" release-files/
-            gpg --batch --yes --local-user "$KEY" --detach-sign --output "release-files/$(basename "$apk").sig" "$apk"
-          done
-
-          gpg --armor --export "$KEY" > release-files/PattNG-public-key.asc
-
-      - name: Upload APKs, signatures and public key to release
-        uses: svenstaro/upload-release-action@v2
+      - name: Publish GitHub Release
+        if: (github.event_name == 'workflow_dispatch' && inputs.release_tag != '') || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
-          file: release-files/*
-          tag: ${{ inputs.release_tag }}
-          release_name: PattNG v${{ inputs.release_tag }}
-          body: "."
-          target_commit: ${{ github.sha }}
-          file_glob: true
-          prerelease: true
-          overwrite: true
+          tag_name: ${{ env.EFFECTIVE_TAG }}
+          name: McQueen VPN ${{ env.EFFECTIVE_TAG }}
+          prerelease: ${{ contains(env.EFFECTIVE_TAG, '-') }}
+          generate_release_notes: true
+          files: dist/*

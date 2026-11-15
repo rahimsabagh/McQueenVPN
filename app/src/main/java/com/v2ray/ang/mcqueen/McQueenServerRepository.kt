@@ -22,11 +22,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
 import java.io.IOException
 import java.util.Locale
 import java.util.UUID
@@ -103,25 +106,74 @@ class McQueenServerRepository(
     }
 
     suspend fun loadCachedManifest(context: Context): ManifestParseResult? = withContext(Dispatchers.IO) {
-        val cachedJson = MmkvManager.decodeSettingsString(AppConfig.PREF_MCQUEEN_MANIFEST_CACHE)
-        if (cachedJson.isNullOrBlank()) return@withContext null
+        manifestMutex.withLock {
+            loadCachedOrBundledManifestLocked(context)
+        }
+    }
 
-        val parsed = runCatching {
+    private fun loadCachedOrBundledManifestLocked(context: Context): ManifestParseResult? {
+        if (!AetherCoreManager.isSupported(context)) {
+            LogUtil.w(
+                AppConfig.TAG,
+                "McQueenServerRepository: Aether binary not executable yet in nativeLibraryDir; retaining aether:// entries in server directory"
+            )
+        }
+
+        val cachedJson = MmkvManager.decodeSettingsString(AppConfig.PREF_MCQUEEN_MANIFEST_CACHE)
+        if (!cachedJson.isNullOrBlank()) {
+            val parsed = parseManifestForDirectory(cachedJson)
+            if (parsed != null && parsed.servers.isNotEmpty()) {
+                val existingGuids = MmkvManager.decodeServerList(AppConfig.MCQUEEN_SUBSCRIPTION_ID)
+                if (existingGuids.size < parsed.servers.size) {
+                    persistServersToMmkv(parsed.servers)
+                }
+                return parsed
+            }
+        }
+
+        val bundledJson = loadBundledManifestJson(context) ?: return null
+        val bundledParsed = parseManifestForDirectory(bundledJson) ?: return null
+        if (bundledParsed.servers.isEmpty()) return null
+
+        runCatching {
+            persistServersToMmkv(bundledParsed.servers)
+            MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_MANIFEST_CACHE, bundledJson)
+        }.onFailure { e ->
+            LogUtil.w(AppConfig.TAG, "McQueenServerRepository: failed to seed bundled servers.json into MMKV", e)
+        }
+        return bundledParsed
+    }
+
+    private fun parseManifestForDirectory(json: String): ManifestParseResult? {
+        return runCatching {
             RemoteServerManifestParser.parse(
-                json = cachedJson,
-                isAetherSupported = AetherCoreManager.isSupported(context),
+                json = json,
+                isAetherSupported = true,
                 subscriptionId = AppConfig.MCQUEEN_SUBSCRIPTION_ID,
                 verifyOutbound = ::isOutboundBuildable,
             )
-        }.getOrNull() ?: return@withContext null
+        }.onFailure { e ->
+            LogUtil.w(AppConfig.TAG, "McQueenServerRepository: failed to parse manifest JSON", e)
+        }.getOrNull()
+    }
 
-        if (parsed.servers.isEmpty()) return@withContext null
-
-        val existingGuids = MmkvManager.decodeServerList(AppConfig.MCQUEEN_SUBSCRIPTION_ID)
-        if (existingGuids.isEmpty()) {
-            persistServersToMmkv(parsed.servers)
+    internal fun loadBundledManifestJson(context: Context? = null): String? {
+        if (context != null) {
+            val fromAsset = runCatching {
+                context.assets.open(BUNDLED_MANIFEST_ASSET_NAME).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            }.getOrNull()
+            if (!fromAsset.isNullOrBlank()) {
+                return fromAsset
+            }
         }
-        parsed
+        val fileCandidates = listOf(
+            File(BUNDLED_MANIFEST_ASSET_NAME),
+            File("../$BUNDLED_MANIFEST_ASSET_NAME"),
+            File("app/src/main/assets/$BUNDLED_MANIFEST_ASSET_NAME"),
+        )
+        return fileCandidates.firstOrNull { it.isFile }?.let { file ->
+            runCatching { file.readText(Charsets.UTF_8) }.getOrNull()
+        }?.takeIf { it.isNotBlank() }
     }
 
     suspend fun syncFromGitHub(
@@ -139,7 +191,10 @@ class McQueenServerRepository(
         val responseJson = try {
             fetchManifestJson(targetUrl, effectiveToken)
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "McQueenServerRepository: fetch failed", e)
+            LogUtil.e(AppConfig.TAG, "McQueenServerRepository: fetch failed for url=$targetUrl", e)
+            manifestMutex.withLock {
+                loadCachedOrBundledManifestLocked(context)
+            }
             return@withContext ManifestSyncOutcome.Failure(
                 e.message?.takeIf { it.isNotBlank() } ?: "Network error"
             )
@@ -148,26 +203,34 @@ class McQueenServerRepository(
         val parsed = try {
             RemoteServerManifestParser.parse(
                 json = responseJson,
-                isAetherSupported = AetherCoreManager.isSupported(context),
+                isAetherSupported = true,
                 subscriptionId = AppConfig.MCQUEEN_SUBSCRIPTION_ID,
                 verifyOutbound = ::isOutboundBuildable,
             )
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "McQueenServerRepository: validation failed", e)
+            manifestMutex.withLock {
+                loadCachedOrBundledManifestLocked(context)
+            }
             return@withContext ManifestSyncOutcome.Failure(
                 e.message?.takeIf { it.isNotBlank() } ?: "Invalid manifest format"
             )
         }
 
         if (parsed.servers.isEmpty()) {
+            manifestMutex.withLock {
+                loadCachedOrBundledManifestLocked(context)
+            }
             return@withContext ManifestSyncOutcome.Failure("No enabled usable servers found in manifest")
         }
 
         try {
-            persistServersToMmkv(parsed.servers)
-            MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_MANIFEST_CACHE, responseJson)
-            if (urlOverride != null) {
-                MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_SERVERS_URL, targetUrl)
+            manifestMutex.withLock {
+                persistServersToMmkv(parsed.servers)
+                MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_MANIFEST_CACHE, responseJson)
+                if (urlOverride != null) {
+                    MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_SERVERS_URL, targetUrl)
+                }
             }
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "McQueenServerRepository: storage failed", e)
@@ -235,7 +298,7 @@ class McQueenServerRepository(
         countryCode: String,
     ): Boolean = withContext(Dispatchers.IO) {
         val normalizedCode = countryCode.trim().uppercase(Locale.ROOT)
-        val candidates = loadStoredProfilesByCountry()[normalizedCode].orEmpty()
+        val candidates = loadStoredProfilesByCountry(context)[normalizedCode].orEmpty()
         candidates.any { (_, profile) ->
             engineFor(profile) == TunnelEngine.AETHER &&
                 !identityProvisioner.hasValidIdentity(context, profile)
@@ -247,7 +310,7 @@ class McQueenServerRepository(
         countryCode: String,
     ): CountryIdentityStatus = withContext(Dispatchers.IO) {
         val normalizedCode = countryCode.trim().uppercase(Locale.ROOT)
-        val candidates = loadStoredProfilesByCountry()[normalizedCode].orEmpty()
+        val candidates = loadStoredProfilesByCountry(context)[normalizedCode].orEmpty()
         if (candidates.isEmpty()) {
             return@withContext CountryIdentityStatus.Ready(newlyProvisioned = false)
         }
@@ -300,7 +363,7 @@ class McQueenServerRepository(
         countryCode: String,
     ): List<CandidateLatency> = withContext(Dispatchers.IO) {
         val normalizedCode = countryCode.trim().uppercase(Locale.ROOT)
-        val allCandidates = loadStoredProfilesByCountry()[normalizedCode].orEmpty()
+        val allCandidates = loadStoredProfilesByCountry(context)[normalizedCode].orEmpty()
         val candidates = allCandidates.filter { (_, profile) ->
             engineFor(profile) != TunnelEngine.AETHER || identityProvisioner.hasValidIdentity(context, profile)
         }
@@ -387,35 +450,80 @@ class McQueenServerRepository(
         }
     }
 
-    internal fun fetchManifestJson(url: String, authToken: String? = null): String {
-        val requestBuilder = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .header("Cache-Control", "no-cache")
-
+    internal fun fetchManifestJson(
+        url: String,
+        authToken: String? = null,
+        maxAttempts: Int = DEFAULT_FETCH_MAX_ATTEMPTS,
+    ): String {
         val sanitizedToken = authToken?.trim()?.takeIf { it.isNotEmpty() }
-        if (sanitizedToken != null) {
-            if (!McQueenServerConfig.isAuthEligibleUrl(url)) {
-                throw IOException("Refused sending credentials to non-HTTPS URL")
-            }
-            requestBuilder.header("Authorization", "Bearer $sanitizedToken")
+        if (sanitizedToken != null && !McQueenServerConfig.isAuthEligibleUrl(url)) {
+            throw IOException("Refused sending credentials to non-HTTPS URL")
         }
 
-        httpClient.newCall(requestBuilder.build()).execute().use { response ->
-            if (!McQueenServerConfig.isValidManifestUrl(response.request.url.toString())) {
-                throw IOException("Refused non-HTTPS manifest response URL")
+        val totalAttempts = maxAttempts.coerceIn(1, 5)
+        var lastException: IOException? = null
+
+        for (attempt in 1..totalAttempts) {
+            try {
+                val requestBuilder = Request.Builder()
+                    .url(url)
+                    .header("Accept", "application/json")
+                    .header("Cache-Control", "no-cache")
+
+                if (sanitizedToken != null) {
+                    requestBuilder.header("Authorization", "Bearer $sanitizedToken")
+                }
+
+                httpClient.newCall(requestBuilder.build()).execute().use { response ->
+                    if (!McQueenServerConfig.isValidManifestUrl(response.request.url.toString())) {
+                        throw NonRetryableManifestException("Refused non-HTTPS manifest response URL")
+                    }
+                    val code = response.code
+                    if (!response.isSuccessful) {
+                        val msg = "HTTP $code while fetching servers.json"
+                        if (code in 400..499 && code != 408 && code != 429) {
+                            throw NonRetryableManifestException(msg)
+                        }
+                        throw IOException(msg)
+                    }
+                    val body = response.body.string()
+                    if (body.isBlank()) {
+                        throw IOException("Empty response body from $url")
+                    }
+                    return body
+                }
+            } catch (e: NonRetryableManifestException) {
+                throw IOException(e.message, e)
+            } catch (e: IOException) {
+                lastException = e
+                if (attempt < totalAttempts) {
+                    try {
+                        Thread.sleep(RETRY_BASE_DELAY_MS * attempt)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw e
+                    }
+                }
             }
-            if (!response.isSuccessful) {
-                throw IOException("HTTP ${response.code} while fetching servers.json")
-            }
-            return response.body.string()
         }
+
+        throw lastException ?: IOException("Failed to fetch servers.json after $totalAttempts attempts")
+    }
+
+    private class NonRetryableManifestException(message: String) : IOException(message)
+
+    internal fun deterministicServerGuid(countryCode: String, serverId: String): String {
+        val key = "mcqueen:${countryCode.trim().uppercase(Locale.ROOT)}|${serverId.trim()}"
+        return UUID.nameUUIDFromBytes(key.toByteArray(Charsets.UTF_8))
+            .toString()
+            .replace("-", "")
     }
 
     private fun persistServersToMmkv(servers: List<ValidatedServer>) {
+        if (servers.isEmpty()) return
         val profiles = linkedMapOf<String, ProfileItem>()
         servers.forEach { server ->
-            val guid = Utils.getUuid()
+            val guid = deterministicServerGuid(server.countryCode, server.id)
             profiles[guid] = server.profile
         }
         MmkvManager.saveServerProfiles(
@@ -426,8 +534,18 @@ class McQueenServerRepository(
         )
     }
 
-    private fun loadStoredProfilesByCountry(): Map<String, List<Pair<String, ProfileItem>>> {
-        val guids = MmkvManager.decodeServerList(AppConfig.MCQUEEN_SUBSCRIPTION_ID)
+    private suspend fun loadStoredProfilesByCountry(
+        context: Context? = null,
+    ): Map<String, List<Pair<String, ProfileItem>>> {
+        var guids = MmkvManager.decodeServerList(AppConfig.MCQUEEN_SUBSCRIPTION_ID)
+        if (guids.isEmpty() && context != null) {
+            manifestMutex.withLock {
+                if (MmkvManager.decodeServerList(AppConfig.MCQUEEN_SUBSCRIPTION_ID).isEmpty()) {
+                    loadCachedOrBundledManifestLocked(context)
+                }
+                guids = MmkvManager.decodeServerList(AppConfig.MCQUEEN_SUBSCRIPTION_ID)
+            }
+        }
         val grouped = linkedMapOf<String, MutableList<Pair<String, ProfileItem>>>()
         for (guid in guids) {
             val profile = MmkvManager.decodeServerConfig(guid) ?: continue
@@ -472,6 +590,11 @@ class McQueenServerRepository(
     }
 
     companion object {
+        private const val BUNDLED_MANIFEST_ASSET_NAME = "servers.json"
+        private const val DEFAULT_FETCH_MAX_ATTEMPTS = 3
+        private const val RETRY_BASE_DELAY_MS = 250L
+        private val manifestMutex = Mutex()
+
         fun engineFor(profile: ProfileItem): TunnelEngine = engineFor(profile.configType)
 
         fun engineFor(configType: EConfigType): TunnelEngine =

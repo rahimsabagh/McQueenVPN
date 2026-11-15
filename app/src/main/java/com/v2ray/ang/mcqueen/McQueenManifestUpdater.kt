@@ -6,10 +6,12 @@ import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.multiprocess.RemoteWorkManager
 import com.v2ray.ang.AngApplication
 import com.v2ray.ang.AppConfig
+import com.v2ray.ang.helper.MessageHelper
 import com.v2ray.ang.util.LogUtil
 import java.util.concurrent.TimeUnit
 
@@ -62,7 +64,16 @@ object McQueenManifestUpdater {
                 "McQueenManifestUpdater: scheduled interval=${McQueenServerConfig.MANIFEST_REFRESH_INTERVAL_MINUTES}m policy=$policy"
             )
         }.onFailure { e ->
-            LogUtil.e(AppConfig.TAG, "McQueenManifestUpdater: failed to schedule manifest refresh", e)
+            LogUtil.w(AppConfig.TAG, "McQueenManifestUpdater: RemoteWorkManager failed, falling back to WorkManager", e)
+            runCatching {
+                WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+                    McQueenServerConfig.MANIFEST_REFRESH_TASK_NAME,
+                    policy,
+                    request,
+                )
+            }.onFailure { fallbackError ->
+                LogUtil.e(AppConfig.TAG, "McQueenManifestUpdater: failed to schedule manifest refresh", fallbackError)
+            }
         }
     }
 
@@ -78,6 +89,7 @@ object McQueenManifestUpdater {
                         AppConfig.TAG,
                         "McQueenManifestUpdater: refreshed ${outcome.manifest.countries.size} countries"
                     )
+                    MessageHelper.sendMsg2UI(applicationContext, AppConfig.MSG_SERVERS_CHANGED, "")
                     Result.success()
                 }
 

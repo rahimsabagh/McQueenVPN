@@ -1,3 +1,5 @@
+import java.util.zip.ZipFile
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -12,8 +14,19 @@ android {
         applicationId = "com.aistudio.mcqueenvpn.rmqvpn"
         minSdk = 29
         targetSdk = 36
-        versionCode = 761
-        versionName = "1.0.0-beta.1"
+        val configuredVersionCode = (project.findProperty("mcqueenVersionCode") as? String)
+            ?.trim()
+            ?.toIntOrNull()
+            ?: 762
+        val configuredVersionName = ((project.findProperty("mcqueenVersionName") as? String)
+            ?: (project.findProperty("pattngVersion") as? String))
+            ?.trim()
+            ?.removePrefix("v")
+            ?.removePrefix("V")
+            ?.takeIf { it.isNotEmpty() }
+            ?: "1.0.0-beta.2"
+        versionCode = configuredVersionCode
+        versionName = configuredVersionName
         buildConfigField("String", "DISTRIBUTION", "\"Play Store\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -210,3 +223,115 @@ dependencies {
     testImplementation(libs.mockwebserver)
     coreLibraryDesugaring(libs.desugar.jdk.libs)
 }
+
+val ensureLibv2rayAar = tasks.register("ensureLibv2rayAar") {
+    val libsDir = layout.projectDirectory.dir("libs").asFile
+    val aarFile = File(libsDir, "libv2ray.aar")
+    val requiredAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    val requiredNativeLibs = listOf(
+        "libaether.so",
+        "libpsiphon-tunnel-core.so",
+        "liblyrebird.so",
+        "libhev-socks5-tunnel.so"
+    )
+    val assetsDir = layout.projectDirectory.dir("src/main/assets").asFile
+    val bundledServersJson = File(assetsDir, "servers.json")
+    val rootServersJson = rootProject.layout.projectDirectory.file("servers.json").asFile
+    val requiredGeoAssets = listOf("geoip.dat", "geosite.dat", "geoip-only-cn-private.dat")
+
+    onlyIf {
+        val aarMissing = !aarFile.exists() || aarFile.length() == 0L
+        val nativeMissing = requiredAbis.any { abi ->
+            requiredNativeLibs.any { libName ->
+                val soFile = File(libsDir, "$abi/$libName")
+                !soFile.exists() || soFile.length() == 0L
+            }
+        }
+        val geoMissing = requiredGeoAssets.any { geoName ->
+            val geoFile = File(assetsDir, geoName)
+            !geoFile.exists() || geoFile.length() == 0L
+        }
+        val serversAssetMissing = (!bundledServersJson.exists() || bundledServersJson.length() == 0L) && rootServersJson.isFile
+        aarMissing || nativeMissing || geoMissing || serversAssetMissing
+    }
+    doLast {
+        libsDir.mkdirs()
+        assetsDir.mkdirs()
+
+        if ((!bundledServersJson.exists() || bundledServersJson.length() == 0L) && rootServersJson.isFile) {
+            rootServersJson.copyTo(bundledServersJson, overwrite = true)
+        }
+
+        if (!aarFile.exists() || aarFile.length() == 0L) {
+            val releaseUrl = project.uri("https://github.com/patterniha/AndroidLibXrayLite/releases/download/v26.11.20/libv2ray.aar").toURL()
+            releaseUrl.openStream().use { input ->
+                aarFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+        }
+
+        val nativeMissing = requiredAbis.any { abi ->
+            requiredNativeLibs.any { libName ->
+                val soFile = File(libsDir, "$abi/$libName")
+                !soFile.exists() || soFile.length() == 0L
+            }
+        }
+        val geoMissing = requiredGeoAssets.any { geoName ->
+            val geoFile = File(assetsDir, geoName)
+            !geoFile.exists() || geoFile.length() == 0L
+        }
+        if (nativeMissing || geoMissing) {
+            val tempApk = File(temporaryDir, "mcqueen-release.apk")
+            val apkUrl = project.uri("https://github.com/rahimsabagh/McQueenVPN/releases/download/V1.0.0-beta.1/app-release.apk").toURL()
+            apkUrl.openStream().use { input ->
+                tempApk.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            ZipFile(tempApk).use { zip ->
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    if (entry.isDirectory) continue
+                    val name = entry.name
+                    if (name.startsWith("lib/") &&
+                        (name.endsWith("/libaether.so") ||
+                            name.endsWith("/libpsiphon-tunnel-core.so") ||
+                            name.endsWith("/liblyrebird.so") ||
+                            name.endsWith("/libhev-socks5-tunnel.so") ||
+                            name.endsWith("/libhevsockstun.so"))
+                    ) {
+                        val relPath = name.removePrefix("lib/")
+                        val targetFile = File(libsDir, relPath)
+                        if (!targetFile.exists() || targetFile.length() == 0L) {
+                            targetFile.parentFile?.mkdirs()
+                            zip.getInputStream(entry).use { input ->
+                                targetFile.outputStream().use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                            targetFile.setExecutable(true, false)
+                        }
+                    } else if (name in setOf("assets/geoip.dat", "assets/geosite.dat", "assets/geoip-only-cn-private.dat")) {
+                        val assetFile = File(assetsDir, name.removePrefix("assets/"))
+                        if (!assetFile.exists() || assetFile.length() == 0L) {
+                            zip.getInputStream(entry).use { input ->
+                                assetFile.outputStream().use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            tempApk.delete()
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(ensureLibv2rayAar)
+}
+
+

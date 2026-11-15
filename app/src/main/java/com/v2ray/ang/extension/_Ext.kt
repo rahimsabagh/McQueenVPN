@@ -26,13 +26,13 @@ fun Long.toSpeedString(): String = this.toTrafficString() + "/s"
  */
 fun Long.toTrafficString(): String {
     val units = arrayOf("B", "KB", "MB", "GB", "TB", "PB")
-    var size = this.toDouble()
+    var size = this.coerceAtLeast(0L).toDouble()
     var unitIndex = 0
     while (size >= THRESHOLD && unitIndex < units.size - 1) {
         size /= DIVISOR
         unitIndex++
     }
-    return String.format(Locale.getDefault(), "%.1f %s", size, units[unitIndex])
+    return String.format(Locale.US, "%.1f %s", size, units[unitIndex])
 }
 
 val URI.idnHost: String

@@ -16,6 +16,7 @@ import java.io.Serializable
 
 object MessageHelper {
     const val EXTRA_REQUEST_ID = "requestId"
+    const val EXTRA_DELAY_MS = "delayMs"
 
     /**
      * Sends a message to the service.
@@ -24,8 +25,8 @@ object MessageHelper {
      * @param what The message identifier.
      * @param content The message content.
      */
-    fun sendMsg2Service(ctx: Context, what: Int, content: Serializable) {
-        sendMsg(ctx, AppConfig.BROADCAST_ACTION_SERVICE, what, content)
+    fun sendMsg2Service(ctx: Context, what: Int, content: Serializable, requestId: String? = null) {
+        sendMsg(ctx, AppConfig.BROADCAST_ACTION_SERVICE, what, content, requestId)
     }
 
     /**
@@ -66,8 +67,14 @@ object MessageHelper {
      * @param what The message identifier.
      * @param content The message content.
      */
-    fun sendMsg2UI(ctx: Context, what: Int, content: Serializable, requestId: String? = null) {
-        sendMsg(ctx, AppConfig.BROADCAST_ACTION_ACTIVITY, what, content, requestId)
+    fun sendMsg2UI(
+        ctx: Context,
+        what: Int,
+        content: Serializable,
+        requestId: String? = null,
+        delayMs: Long? = null,
+    ) {
+        sendMsg(ctx, AppConfig.BROADCAST_ACTION_ACTIVITY, what, content, requestId, delayMs)
     }
 
     /**
@@ -150,10 +157,18 @@ object MessageHelper {
      * @param what The message identifier.
      * @param content The message content.
      */
-    private fun sendMsg(ctx: Context, action: String, what: Int, content: Serializable, requestId: String? = null) {
+    private fun sendMsg(
+        ctx: Context,
+        action: String,
+        what: Int,
+        content: Serializable,
+        requestId: String? = null,
+        delayMs: Long? = null,
+    ) {
         try {
             ctx.sendBroadcast(messageIntent(action, what, content).apply {
                 requestId?.let { putExtra(EXTRA_REQUEST_ID, it) }
+                delayMs?.let { putExtra(EXTRA_DELAY_MS, it) }
             })
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to send message with action: $action", e)

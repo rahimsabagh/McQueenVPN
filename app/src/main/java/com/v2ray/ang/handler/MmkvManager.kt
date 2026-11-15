@@ -1204,6 +1204,13 @@ object MmkvManager {
         return settingsStorage.decodeStringSet(key)
     }
 
+    /**
+     * Checks whether the settings storage already contains an explicit value for [key].
+     */
+    fun containsSetting(key: String): Boolean {
+        return settingsStorage.containsKey(key)
+    }
+
 
     /**
      * Encodes the start on boot setting.

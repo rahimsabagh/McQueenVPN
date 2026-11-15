@@ -174,6 +174,7 @@ object NotificationHelper {
         val displayTitle = title.ifEmpty { context.getString(R.string.app_name) }
         return NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_stat_mcqueen)
+            .setColor(0xFF941E29.toInt())
             .setContentTitle(displayTitle)
             .setContentText(content)
             .setOngoing(false)

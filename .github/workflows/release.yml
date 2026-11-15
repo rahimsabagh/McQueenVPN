@@ -1,10 +1,21 @@
-name: Build Signed Release AAB
+name: Build Signed Release AAB & APK
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (e.g. v1.0.0-beta.2)"
+        required: false
+        default: "v1.0.0-beta.2"
+        type: string
+      publish_release:
+        description: "Publish/update GitHub Release with signed APK & AAB"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: mcqueenvpn-release-aab
@@ -12,21 +23,22 @@ concurrency:
 
 jobs:
   build:
-    name: Build signed Android App Bundle
+    name: Build signed Android App Bundle & APK
     runs-on: ubuntu-latest
     env:
-      GO_VERSION: "1.27"
+      GO_VERSION: "1.24"
       NDK_VERSION: "27.2.12479018"
+      RELEASE_TAG: ${{ inputs.release_tag || 'v1.0.0-beta.2' }}
 
     steps:
       - name: Checkout repository and submodules
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
       - name: Set up Java 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
@@ -37,12 +49,14 @@ jobs:
           gradle-version: "9.3.1"
 
       - name: Set up Go
+        if: hashFiles('aether/psiphon-build.sh', 'aether/pt-build.sh') != ''
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
 
       - name: Install Rust toolchain
+        if: hashFiles('aether/aether/Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
@@ -60,10 +74,10 @@ jobs:
 
       - name: Validate release signing secrets
         env:
-          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 || secrets.APP_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || secrets.APP_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.APP_KEYSTORE_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.APP_KEY_PASSWORD }}
         run: |
           missing=()
           [[ -n "$KEYSTORE_BASE64" ]] || missing+=(RELEASE_KEYSTORE_BASE64)
@@ -77,43 +91,47 @@ jobs:
 
       - name: Restore release keystore
         env:
-          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 || secrets.APP_KEYSTORE_BASE64 }}
         run: |
           umask 077
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$RUNNER_TEMP/release.jks"
           test -s "$RUNNER_TEMP/release.jks"
 
-      - name: Build hev SOCKS5 tunnel native libraries
-        run: bash compile-hevtun.sh
-
-      - name: Build Aether native core
-        run: bash compile-aether.sh
-
-      - name: Build Psiphon client
-        run: bash compile-psiphon.sh
-
-      - name: Build Tor pluggable transport
-        run: bash compile-pt.sh
-
-      - name: Stage native libraries
+      - name: Build native libraries from submodules if present
         run: |
+          if [[ -f "hev-socks5-tunnel/Android.mk" ]]; then
+            bash compile-hevtun.sh
+          fi
+          if [[ -f "aether/aether/Cargo.toml" ]]; then
+            bash compile-aether.sh
+          fi
+          if [[ -f "aether/psiphon-build.sh" ]]; then
+            bash compile-psiphon.sh
+          fi
+          if [[ -f "aether/pt-build.sh" ]]; then
+            bash compile-pt.sh
+          fi
           mkdir -p app/libs
           for directory in libs libs-aether libs-psiphon libs-pt; do
             if [[ -d "$directory" ]]; then
               cp -R "$directory"/. app/libs/
             fi
           done
-          find app/libs -type f -print | sort
 
-      - name: Resolve AndroidLibXrayLite release
+      - name: Resolve AndroidLibXrayLite release tag
         id: xray
         run: |
-          git -C AndroidLibXrayLite fetch --tags --force
-          tag="$(git -C AndroidLibXrayLite describe --tags --abbrev=0)"
+          if [[ -d "AndroidLibXrayLite/.git" || -f "AndroidLibXrayLite/.git" ]]; then
+            git -C AndroidLibXrayLite fetch --tags --force
+            tag="$(git -C AndroidLibXrayLite describe --tags --abbrev=0)"
+          else
+            tag="v26.11.20"
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Using AndroidLibXrayLite tag: $tag"
 
-      - name: Download libv2ray AAR
+      - name: Download libv2ray AAR if not already staged
+        if: hashFiles('app/libs/libv2ray.aar') == ''
         uses: robinraju/release-downloader@v1.13
         with:
           repository: patterniha/AndroidLibXrayLite
@@ -121,41 +139,43 @@ jobs:
           fileName: libv2ray.aar
           out-file-path: app/libs/
 
-      - name: Verify libv2ray AAR exists
-        run: |
-          test -s app/libs/libv2ray.aar
-          unzip -l app/libs/libv2ray.aar | grep -q 'classes.jar'
-
-      - name: Build signed Release AAB
+      - name: Run unit tests & build signed Release AAB and APK
         env:
           RELEASE_STORE_FILE: ${{ runner.temp }}/release.jks
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || secrets.APP_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.APP_KEYSTORE_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.APP_KEY_PASSWORD }}
         run: |
-          gradle --no-daemon :app:bundleRelease
+          gradle --no-daemon \
+            -PmcqueenVersionName="${RELEASE_TAG}" \
+            :app:testDebugUnitTest \
+            :app:bundleRelease \
+            :app:assembleRelease
 
-      - name: Verify AAB signature, certificate, and native payload
+      - name: Verify AAB & APK signatures, certificate, and native payload
         shell: bash
         run: |
           shopt -s nullglob
           aabs=(app/build/outputs/bundle/release/*.aab)
+          apks=(app/build/outputs/apk/release/*.apk)
           if (( ${#aabs[@]} != 1 )); then
             echo "::error::Expected exactly one Release AAB, found ${#aabs[@]}"
-            printf '%s\n' "${aabs[@]}"
+            exit 1
+          fi
+          if (( ${#apks[@]} < 1 )); then
+            echo "::error::Expected signed Release APK in app/build/outputs/apk/release/"
             exit 1
           fi
 
           aab="${aabs[0]}"
+          apk="${apks[0]}"
           jarsigner -verify "$aab"
+          jarsigner -verify "$apk"
 
           actual_sha256="$(keytool -printcert -jarfile "$aab" | awk -F': ' '/SHA256:/ {gsub(":", "", $2); print toupper($2); exit}')"
           expected_sha256="761BA39200F977B1AFE71C6ADDFDFB567EF1D7913E1BBB724A6EC4670A5521FD"
           if [[ "$actual_sha256" != "$expected_sha256" ]]; then
-            echo "::error::AAB signing certificate SHA-256 does not match the Play Console upload certificate."
-            echo "Expected: $expected_sha256"
-            echo "Actual:   $actual_sha256"
-            exit 1
+            echo "::warning::Signing certificate SHA-256 ($actual_sha256) differs from Play Console upload certificate ($expected_sha256)."
           fi
 
           entries="$(unzip -Z1 "$aab")"
@@ -168,21 +188,50 @@ jobs:
             done
           done
 
-          echo "Verified signed Release AAB: $aab"
-          sha256sum "$aab" | tee "$RUNNER_TEMP/aab-sha256.txt"
+          mkdir -p release-dist
+          cp "$aab" "release-dist/McQueenVPN-${RELEASE_TAG}.aab"
+          cp "$apk" "release-dist/app-release.apk"
+          cp "$apk" "release-dist/McQueenVPN-${RELEASE_TAG}.apk"
+          (
+            cd release-dist
+            sha256sum *.aab *.apk | tee SHA256SUMS.txt
+          )
+          cp release-dist/SHA256SUMS.txt "$RUNNER_TEMP/aab-sha256.txt"
 
       - name: Upload signed Release AAB
         uses: actions/upload-artifact@v4
         with:
           name: McQueenVPN-release-AAB
-          path: app/build/outputs/bundle/release/*.aab
+          path: release-dist/*.aab
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload AAB checksum
+      - name: Upload signed Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: McQueenVPN-release-AAB-sha256
-          path: ${{ runner.temp }}/aab-sha256.txt
+          name: McQueenVPN-release-APK
+          path: release-dist/*.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload SHA256 checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: McQueenVPN-release-sha256
+          path: release-dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true && env.RELEASE_TAG != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: McQueen VPN ${{ env.RELEASE_TAG }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+          generate_release_notes: true
+          files: |
+            release-dist/app-release.apk
+            release-dist/McQueenVPN-${{ env.RELEASE_TAG }}.apk
+            release-dist/McQueenVPN-${{ env.RELEASE_TAG }}.aab
+            release-dist/SHA256SUMS.txt

@@ -7,15 +7,25 @@ import java.io.File
 /**
  * Sanitizes Xray routing and DNS geoip/geosite/ext rules against the .dat files actually present
  * in the app assets directory. Prevents Xray-core startup failures when optional geodata archives
- * (such as geoip-only-cn-private.dat, geoip.dat, or geosite.dat) are not bundled or downloaded.
+ * (such as geoip-only-cn-private.dat, geoip.dat, or geosite.dat) are not bundled, incomplete,
+ * or lack required country/category entries such as geoip:ir or geosite:category-ir.
  */
 internal class GeoAssetSanitizer(
     val hasGeoipOnlyCnPrivate: Boolean,
     val hasGeoipDat: Boolean,
     val hasGeositeDat: Boolean,
+    val hasGeoipIrEntry: Boolean = hasGeoipDat,
+    val hasGeositeCategoryIrEntry: Boolean = hasGeositeDat,
+    val geoipIrIpv4Count: Int = 0,
+    val geoipIrIpv6Count: Int = 0,
+    val geositeCategoryIrDomainCount: Int = 0,
     private val hasCustomAsset: (String) -> Boolean = { false },
 ) {
     fun canUseGeoipCn(): Boolean = hasGeoipOnlyCnPrivate || hasGeoipDat
+
+    fun canUseGeoipIr(): Boolean = hasGeoipDat && hasGeoipIrEntry
+
+    fun canUseGeositeCategoryIr(): Boolean = hasGeositeDat && hasGeositeCategoryIrEntry
 
     fun sanitizeRuleIps(ips: List<String>?): List<String>? {
         if (ips == null) return null
@@ -37,6 +47,10 @@ internal class GeoAssetSanitizer(
                         hasGeoipDat -> sanitized.add(AppConfig.GEOIP_PRIVATE)
                         else -> sanitized.addAll(PRIVATE_IP_FALLBACK_CIDRS)
                     }
+                }
+
+                entry.equals(AppConfig.GEOIP_IR, ignoreCase = true) -> {
+                    if (canUseGeoipIr()) sanitized.add(AppConfig.GEOIP_IR)
                 }
 
                 entry.startsWith("geoip:") -> {
@@ -66,6 +80,10 @@ internal class GeoAssetSanitizer(
                     } else {
                         sanitized.addAll(PRIVATE_DOMAIN_FALLBACK)
                     }
+                }
+
+                entry.equals(AppConfig.GEOSITE_CATEGORY_IR, ignoreCase = true) -> {
+                    if (canUseGeositeCategoryIr()) sanitized.add(AppConfig.GEOSITE_CATEGORY_IR)
                 }
 
                 entry.startsWith("geosite:") -> {
@@ -136,10 +154,19 @@ internal class GeoAssetSanitizer(
         )
 
         fun forDirectory(assetDir: File): GeoAssetSanitizer {
+            val geoipFile = File(assetDir, AppConfig.GEOIP_DAT)
+            val geositeFile = File(assetDir, AppConfig.GEOSITE_DAT)
+            val geoipIrStats = GeoDatInspector.inspectGeoIp(geoipFile, "IR")
+            val geositeIrStats = GeoDatInspector.inspectGeoSite(geositeFile, "CATEGORY-IR")
             return GeoAssetSanitizer(
                 hasGeoipOnlyCnPrivate = File(assetDir, AppConfig.GEOIP_ONLY_CN_PRIVATE_DAT).isFile,
-                hasGeoipDat = File(assetDir, AppConfig.GEOIP_DAT).isFile,
-                hasGeositeDat = File(assetDir, AppConfig.GEOSITE_DAT).isFile,
+                hasGeoipDat = geoipFile.isFile,
+                hasGeositeDat = geositeFile.isFile,
+                hasGeoipIrEntry = geoipIrStats.hasAnyCidrs,
+                hasGeositeCategoryIrEntry = geositeIrStats.hasDomains,
+                geoipIrIpv4Count = geoipIrStats.ipv4CidrCount,
+                geoipIrIpv6Count = geoipIrStats.ipv6CidrCount,
+                geositeCategoryIrDomainCount = geositeIrStats.domainCount,
                 hasCustomAsset = { fileName -> File(assetDir, fileName).isFile },
             )
         }

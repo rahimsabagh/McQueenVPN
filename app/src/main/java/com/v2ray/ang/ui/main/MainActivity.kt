@@ -7,94 +7,137 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.v2ray.ang.core.LauncherManager
-import com.v2ray.ang.enums.PermissionType
-import com.v2ray.ang.handler.SettingsManager
-import com.v2ray.ang.mcqueen.McQueenManifestUpdater
-import com.v2ray.ang.ui.base.HelperBaseComponentActivity
+import com.v2ray.ang.AppConfig
+import com.v2ray.ang.handler.MmkvManager
+import com.v2ray.ang.helper.BatteryOptimizationHelper
+import com.v2ray.ang.ui.base.BaseComponentActivity
 
-class MainActivity : HelperBaseComponentActivity() {
+class MainActivity : BaseComponentActivity() {
+    private val mcQueenViewModel: McQueenViewModel by viewModels()
 
-    private val viewModel: McQueenViewModel by viewModels()
-
-    private val requestVpnPermission = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            viewModel.onVpnPermissionGranted {
-                LauncherManager.startService(this)
+    private val requestVpnPermission =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                mcQueenViewModel.launchServiceAfterPermission()
+            } else {
+                mcQueenViewModel.onVpnPermissionDenied()
             }
-        } else {
-            viewModel.onVpnPermissionDenied()
         }
-    }
+
+    private val requestBatteryOptimizationLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            mcQueenViewModel.refreshBatteryOptimizationStatus()
+        }
+
+    private val requestNotificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+            // Foreground VPN notification works when granted; no blocking action required if declined
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        requestNotificationPermissionIfNeeded()
-        McQueenManifestUpdater.sync(this)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        viewModel.startListenBroadcast()
-    }
-
-    override fun onStop() {
-        super.onStop()
-        viewModel.stopListenBroadcast()
-    }
-
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                checkAndRequestPermission(PermissionType.POST_NOTIFICATIONS) {}
-            }
+        mcQueenViewModel.bindStartVpnCallback {
+            startVpnWithPermissionCheck()
         }
+        super.onCreate(savedInstanceState)
+        requestPostNotificationsIfNeeded()
     }
-
-    private fun prepareVpnIntent() =
-        if (SettingsManager.isVpnMode()) VpnService.prepare(this) else null
 
     @Composable
     override fun ScreenContent() {
-        val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+        val uiState by mcQueenViewModel.uiState.collectAsStateWithLifecycle()
+        val snackbarHostState = remember { SnackbarHostState() }
+
+        LaunchedEffect(mcQueenViewModel.snackbarEvents) {
+            mcQueenViewModel.snackbarEvents.collect { message ->
+                snackbarHostState.showSnackbar(message)
+            }
+        }
+
+        LaunchedEffect(mcQueenViewModel.openExternalUrlEvents) {
+            mcQueenViewModel.openExternalUrlEvents.collect { verifiedUrl ->
+                val opened = runCatching {
+                    val intent = android.content.Intent(
+                        android.content.Intent.ACTION_VIEW,
+                        android.net.Uri.parse(verifiedUrl)
+                    ).apply {
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(intent)
+                }.isSuccess
+                if (!opened) {
+                    snackbarHostState.showSnackbar(getString(com.v2ray.ang.R.string.mcqueen_update_open_failed))
+                }
+            }
+        }
 
         McQueenScreen(
             uiState = uiState,
-            onConnectClick = {
-                viewModel.onConnectActionClicked(
-                    needsVpnPermission = { prepareVpnIntent() != null },
-                    requestVpnPermission = {
-                        val intent = prepareVpnIntent()
-                        if (intent != null) {
-                            requestVpnPermission.launch(intent)
-                        } else {
-                            viewModel.onVpnPermissionGranted {
-                                LauncherManager.startService(this)
-                            }
-                        }
-                    },
-                    startVpnService = {
-                        LauncherManager.startService(this)
-                    },
-                )
+            snackbarHostState = snackbarHostState,
+            onToggleConnect = { mcQueenViewModel.toggleConnection() },
+            onSelectCountry = { country -> mcQueenViewModel.selectCountry(country) },
+            onRefreshLocations = { mcQueenViewModel.syncManifestFromGitHub(silentSuccess = false) },
+            onUpdateManifestSource = { url, token, clearToken ->
+                mcQueenViewModel.updateManifestSourceAndSync(url, token, clearToken)
             },
-            onSelectCountry = viewModel::selectCountry,
-            onRefreshCountries = { viewModel.syncCountries(showToast = true) },
-            onSetThemeMode = viewModel::setThemeMode,
-            onSetAutoBoot = viewModel::setAutoBootEnabled,
-            onSetBypassLan = viewModel::setBypassLanEnabled,
-            onSaveManifestUrl = viewModel::saveManifestUrlAndSync,
-            onResetManifestUrl = viewModel::resetManifestUrlAndSync,
+            onResetManifestSource = { mcQueenViewModel.resetManifestSourceAndSync() },
+            onSelectThemeMode = { mode -> mcQueenViewModel.setThemeMode(mode) },
+            onSetBypassIranEnabled = { enabled -> mcQueenViewModel.setBypassIranEnabled(enabled) },
+            onCheckForUpdate = { mcQueenViewModel.checkForAppUpdate() },
+            onConfirmUpdateNow = { mcQueenViewModel.openVerifiedUpdateUrl() },
+            onDismissUpdateDialog = { mcQueenViewModel.dismissUpdateDialog() },
+            onOpenBatteryOptimizationSettings = {
+                mcQueenViewModel.onConfirmBatteryOptimizationDialog()
+                launchBatteryOptimizationFlow()
+            },
+            onDismissBatteryOptimizationDialog = {
+                mcQueenViewModel.dismissBatteryOptimizationDialog()
+            }
         )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        mcQueenViewModel.onHostResumed()
+    }
+
+    private fun startVpnWithPermissionCheck() {
+        if ((MmkvManager.decodeSettingsString(AppConfig.PREF_MODE) ?: AppConfig.VPN) == AppConfig.VPN) {
+            val vpnIntent = VpnService.prepare(this)
+            if (vpnIntent == null) {
+                mcQueenViewModel.launchServiceAfterPermission()
+            } else {
+                requestVpnPermission.launch(vpnIntent)
+            }
+        } else {
+            mcQueenViewModel.launchServiceAfterPermission()
+        }
+    }
+
+    private fun launchBatteryOptimizationFlow() {
+        runCatching {
+            val intent = BatteryOptimizationHelper.buildBatteryOptimizationIntent(this)
+            requestBatteryOptimizationLauncher.launch(intent)
+        }.onFailure {
+            BatteryOptimizationHelper.openBatteryOptimizationSettings(this)
+        }
+    }
+
+    private fun requestPostNotificationsIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                requestNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 }

@@ -51,7 +51,7 @@ object CoreConfigContextBuilder {
             if (routingTargets) resolveRoutingOutbounds() else emptyList<CoreConfigContext.ResolvedOutbound>() to null
         val resolvedOutbounds = listOf(primaryResolvedOutbound) + routingResolvedOutbounds
         val (fallbackResolvedOutbounds, unresolvedFallback) = resolveFallbackOutbounds(resolvedOutbounds)
-        val routingDomainRules = collectRoutingDomainRulesForDns()
+        val routingDomainRules = collectRoutingDomainRulesForDns(context)
 
         return CoreConfigContext(
             context = context,
@@ -359,9 +359,15 @@ object CoreConfigContextBuilder {
      *
      * outbounds are normalized into three tags only: proxy / direct / block.
      */
-    private fun collectRoutingDomainRulesForDns(): List<CoreConfigContext.RoutingDomainRule> {
-        val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return emptyList()
+    private fun collectRoutingDomainRulesForDns(context: Context): List<CoreConfigContext.RoutingDomainRule> {
+        val rulesetItems = MmkvManager.decodeRoutingRulesets().orEmpty()
         val result = mutableListOf<CoreConfigContext.RoutingDomainRule>()
+
+        if (SettingsManager.isBypassIranEnabled()) {
+            val geoAssets = GeoAssetSanitizer.forDirectory(java.io.File(Utils.userAssetPath(context)))
+            BypassIranRoutingHelper.buildDnsRoutingDomainRule(enabled = true, geoAssets = geoAssets)
+                ?.let { result.add(it) }
+        }
 
         rulesetItems
             .asSequence()

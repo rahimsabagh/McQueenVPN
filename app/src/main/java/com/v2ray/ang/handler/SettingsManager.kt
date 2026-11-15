@@ -266,6 +266,28 @@ object SettingsManager {
     }
 
     /**
+     * Resolves the effective Bypass Iran setting when reading raw storage state.
+     * Unset preferences default to [AppConfig.DEFAULT_MCQUEEN_BYPASS_IRAN] (enabled),
+     * while an explicit stored value (including false) is always preserved.
+     */
+    internal fun resolveBypassIranSetting(hasExplicitValue: Boolean, storedValue: Boolean): Boolean {
+        return if (hasExplicitValue) storedValue else AppConfig.DEFAULT_MCQUEEN_BYPASS_IRAN
+    }
+
+    /** Returns whether Bypass Iran is enabled (defaults to true on first install). */
+    fun isBypassIranEnabled(): Boolean {
+        return MmkvManager.decodeSettingsBool(
+            AppConfig.PREF_MCQUEEN_BYPASS_IRAN,
+            AppConfig.DEFAULT_MCQUEEN_BYPASS_IRAN,
+        )
+    }
+
+    /** Persists the Bypass Iran preference in MMKV. */
+    fun setBypassIranEnabled(enabled: Boolean) {
+        MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_BYPASS_IRAN, enabled)
+    }
+
+    /**
      * Get server via remarks.
      * @param remarks The remarks of the server.
      * @return The ProfileItem.
@@ -414,7 +436,11 @@ object SettingsManager {
                 ?.filter { geo.contains(it) || it == AppConfig.PSIPHON_SERVERS_DAT }
                 ?.filter { name ->
                     val copy = File(extFolder, name)
-                    if (name == AppConfig.PSIPHON_SERVERS_DAT) PsiphonServerList.bundledListGoesOver(copy, publishedAt, keptByUser) else !copy.exists()
+                    if (name == AppConfig.PSIPHON_SERVERS_DAT) {
+                        PsiphonServerList.bundledListGoesOver(copy, publishedAt, keptByUser)
+                    } else {
+                        !copy.exists() || copy.length() == 0L
+                    }
                 }
                 ?.forEach {
                     val target = File(extFolder, it)
@@ -630,6 +656,12 @@ object SettingsManager {
         ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_METHOD, AppConfig.OBSERVATORY_LEAST_LOAD_METHOD)
         ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_SAMPLING, AppConfig.OBSERVATORY_LEAST_LOAD_SAMPLING)
         ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_TIMEOUT, AppConfig.OBSERVATORY_LEAST_LOAD_TIMEOUT)
+        if (!MmkvManager.containsSetting(AppConfig.PREF_SPEED_ENABLED)) {
+            MmkvManager.encodeSettings(AppConfig.PREF_SPEED_ENABLED, AppConfig.DEFAULT_SPEED_ENABLED)
+        }
+        if (!MmkvManager.containsSetting(AppConfig.PREF_MCQUEEN_BYPASS_IRAN)) {
+            MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_BYPASS_IRAN, AppConfig.DEFAULT_MCQUEEN_BYPASS_IRAN)
+        }
     }
 
     private fun ensureDefaultValue(key: String, default: String) {

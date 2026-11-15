@@ -1,6 +1,14 @@
-# Ignore data and key store files
+# Ignore data and key store files (geo *.dat are fetched automatically during preBuild by ensureLibv2rayAar)
 *.dat
 *.jks
+
+# Ignore AI Studio scratch, build output, and chat attachment folders
+/.aistudio/
+/.build-outputs/
+/.kotlin/
+/public/
+/release-dist/
+/dist/
 
 # Ignore output JSON file
 V2rayNG/app/release/output.json
@@ -16,16 +24,19 @@ V2rayNG/app/release/output.json
 
 # Ignore build directories and captures
 /build
+/app/build
 /captures
 V2rayNG/app/build
 V2rayNG/build
 V2rayNG/local.properties
 
-# Ignore prebuilt native libraries (built from submodules by compile-hevtun.sh / AndroidLibXrayLite)
+# Ignore prebuilt native libraries (fetched automatically by ensureLibv2rayAar or built in CI)
+app/libs/
 V2rayNG/app/libs
 
-# Ignore APK and AAR files
+# Ignore APK, AAB, and AAR files
 *.apk
+*.aab
 *.aar
 
 # Ignore signing properties
@@ -45,6 +56,7 @@ V2rayNG/app/google-services.json
 *.orig
 *.class
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 *.war
 *.ear
 
@@ -69,4 +81,5 @@ Thumbs.db
 .DS_Store
 
 # Written by fetch-psiphon-servers.sh for every build beside psiphon_servers.dat (which *.dat covers).
+app/src/main/assets/psiphon_servers.stamp
 V2rayNG/app/src/main/assets/psiphon_servers.stamp

@@ -1,6 +1,6 @@
 # McQueen VPN
 
-**Version:** `1.0.0-beta.1` (`versionCode` 761)  
+**Version:** `1.0.0-beta.2` (`versionCode` 762)  
 **Package ID:** `com.aistudio.mcqueenvpn.rmqvpn`
 
 McQueen VPN is a minimalist, user-friendly Android VPN built with Kotlin and Jetpack Compose. It is designed around a one-tap workflow—open the app, pick a country, and tap Connect—while automatically managing server probing, dual-engine routing (Xray-core and Aether), first-run WARP identity registration, and same-country failover behind the scenes.
@@ -48,9 +48,9 @@ McQueen VPN is a minimalist, user-friendly Android VPN built with Kotlin and Jet
 
 ### Install Pre-Built Beta APK
 
-1. Download `McQueenVPN-v1.0.0-beta.1-debug.apk` from the release assets (or `dist/`).
+1. Download `McQueenVPN-v1.0.0-beta.2-debug.apk` from the release assets (or `dist/`).
 2. Verify the SHA-256 checksum against `SHA256SUMS.txt`.
-3. Install on an Android 10+ device (enable installation from your browser or file manager if prompted, or install via `adb install McQueenVPN-v1.0.0-beta.1-debug.apk`).
+3. Install on an Android 10+ device (enable installation from your browser or file manager if prompted, or install via `adb install McQueenVPN-v1.0.0-beta.2-debug.apk`).
 
 ---
 
@@ -63,9 +63,9 @@ McQueen VPN is a minimalist, user-friendly Android VPN built with Kotlin and Jet
 
 ---
 
-## Known Limitations (`1.0.0-beta.1`)
+## Known Limitations (`1.0.0-beta.2`)
 
-- **Pre-release Beta Status:** This is the first independent beta release (`v1.0.0-beta.1`). Broad physical-device compatibility across OEMs, carriers, and restrictive network environments is still being validated.
+- **Pre-release Beta Status:** This is an active beta release (`v1.0.0-beta.2`). Broad physical-device compatibility across OEMs, carriers, and restrictive network environments is still being validated.
 - **Release Signing Keystore:** Release signing credentials are not committed to the public repository; `:app:assembleRelease` produces an unsigned APK, and pre-built beta APKs distributed from this branch are debug-signed (`debug.keystore`).
 - **Background Manifest Sync Timing:** Periodic WorkManager synchronization is configured for 30-minute intervals, but exact execution timing is governed by Android battery optimizations and Doze mode.
 

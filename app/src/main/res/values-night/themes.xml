@@ -1,22 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="AppThemeBaseCommon" parent="Theme.AppCompat.DayNight.NoActionBar">
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">false</item>
+    <style name="AppThemeDayNight" parent="Theme.AppCompat.DayNight">
         <item name="android:windowBackground">@color/window_background_dark</item>
     </style>
 
-    <style name="AppThemeBase" parent="AppThemeBaseCommon">
-        <item name="android:windowLightNavigationBar">false</item>
+    <style name="AppThemeDayNight.NoActionBar" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@color/window_background_dark</item>
     </style>
 
-    <style name="AppThemeDayNight" parent="AppThemeBase" />
-
-    <style name="AppThemeDayNight.NoActionBar" parent="AppThemeBase" />
-
-    <style name="AppThemeDayNight.NoActionBar.Translucent" parent="AppThemeBase">
+    <style name="AppThemeDayNight.NoActionBar.Translucent" parent="AppThemeDayNight.NoActionBar">
         <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
         <item name="android:windowIsTranslucent">true</item>
     </style>
 </resources>

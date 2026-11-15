@@ -120,4 +120,53 @@ class ConnectionSessionCoordinatorTest {
         assertTrue(exhausted is FailoverDecision.Exhausted)
         assertEquals(VpnConnectionState.FAILED, coordinator.currentState())
     }
+
+    @Test
+    fun `country selection while disconnected or failed does not trigger automatic VPN start`() {
+        val coordinator = ConnectionSessionCoordinator()
+        assertEquals(VpnConnectionState.DISCONNECTED, coordinator.currentState())
+        assertEquals(false, coordinator.shouldTriggerCountrySwitch("DE"))
+
+        coordinator.startAttempt(listOf("srv-1"))
+        coordinator.onStartFailure("failed")
+        assertEquals(VpnConnectionState.FAILED, coordinator.currentState())
+        assertEquals(false, coordinator.shouldTriggerCountrySwitch("NL"))
+    }
+
+    @Test
+    fun `country selection while connected or connecting triggers serialized switch and invalidates stale operations`() {
+        val coordinator = ConnectionSessionCoordinator()
+        coordinator.startAttempt(listOf("de-1", "de-2"), countryCode = "DE")
+        assertEquals(VpnConnectionState.CONNECTED, coordinator.onStartSuccess())
+        assertEquals("DE", coordinator.activeCountryCode)
+
+        // Selecting the same country while connected does not trigger redundant restart
+        assertEquals(false, coordinator.shouldTriggerCountrySwitch("DE"))
+
+        // Selecting a different country while connected triggers switch
+        assertEquals(true, coordinator.shouldTriggerCountrySwitch("NL"))
+        val opNl = coordinator.beginCountrySwitch("NL")
+        assertEquals(VpnConnectionState.RECONNECTING, coordinator.currentState())
+        assertEquals("NL", coordinator.activeCountryCode)
+        assertTrue(coordinator.isSwitchingCountry)
+
+        // Rapidly selecting US before NL finishes invalidates NL's operation ID
+        assertEquals(true, coordinator.shouldTriggerCountrySwitch("US"))
+        val opUs = coordinator.beginCountrySwitch("US")
+        assertEquals(false, coordinator.isCurrentOperation(opNl))
+        assertEquals(true, coordinator.isCurrentOperation(opUs))
+        assertEquals("US", coordinator.activeCountryCode)
+
+        // Old service stop broadcast during switch keeps state in RECONNECTING
+        assertEquals(VpnConnectionState.RECONNECTING, coordinator.onServiceStopped())
+
+        // Attach US candidates and complete connection
+        val firstUsGuid = coordinator.attachSwitchCandidates(opUs, listOf("us-1", "us-2"), "US")
+        assertEquals("us-1", firstUsGuid)
+        assertEquals(VpnConnectionState.CONNECTED, coordinator.onStartSuccess())
+        assertEquals("us-1", coordinator.currentGuid())
+        assertEquals("US", coordinator.activeCountryCode)
+        assertEquals(false, coordinator.isSwitchingCountry)
+    }
 }
+

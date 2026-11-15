@@ -63,7 +63,7 @@ class McQueenServerConfigAndMockFetchTest {
         val dto = JsonUtil.fromJsonSafe(json, RemoteServerManifestDto::class.java)
             ?: error("Failed to decode /servers.json")
 
-        assertEquals(1, dto.version)
+        assertTrue((dto.version ?: 0) >= 1)
         val entries = dto.servers.orEmpty()
         assertTrue(entries.isNotEmpty())
 
@@ -195,4 +195,58 @@ class McQueenServerConfigAndMockFetchTest {
             server.close()
         }
     }
+
+    @Test
+    fun `fetchManifestJson recovers from transient 5xx failure via bounded retry and does not retry 4xx`() {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val validPayload = """{"version":4,"updated_at":"2026-11-14T15:26:03.347Z","servers":[]}"""
+            server.enqueue(MockResponse(code = 502, body = "Bad Gateway"))
+            server.enqueue(MockResponse(code = 503, body = "Service Unavailable"))
+            server.enqueue(MockResponse(code = 200, body = validPayload))
+
+            val repository = McQueenServerRepository(McQueenServerRepository.defaultHttpClient())
+            val url = server.url("/servers.json").toString()
+
+            val body = repository.fetchManifestJson(url, authToken = null, maxAttempts = 3)
+            assertEquals(validPayload, body)
+            assertEquals(3, server.requestCount)
+
+            server.enqueue(MockResponse(code = 404, body = "Not Found"))
+            var failedImmediatelyOn404 = false
+            try {
+                repository.fetchManifestJson(url, authToken = null, maxAttempts = 3)
+            } catch (_: IOException) {
+                failedImmediatelyOn404 = true
+            }
+            assertTrue(failedImmediatelyOn404, "Expected HTTP 404 to fail immediately without retry")
+            assertEquals(4, server.requestCount)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun `bundled servers_json fallback loads all 87 enabled aether servers across 29 countries and produces deterministic guids`() {
+        val repository = McQueenServerRepository(McQueenServerRepository.defaultHttpClient())
+        val bundledJson = repository.loadBundledManifestJson(context = null)
+            ?: error("Expected bundled servers.json fallback to be readable")
+
+        val parsed = RemoteServerManifestParser.parse(bundledJson)
+        assertEquals(87, parsed.servers.size)
+        assertEquals(29, parsed.countries.size)
+        assertEquals(0, parsed.skippedCount)
+
+        val topCodes = parsed.countries.take(2).map { it.countryCode }
+        assertEquals(listOf("UN", "IR"), topCodes)
+        assertTrue(parsed.countries.all { it.availableServerCount == 3 })
+
+        val guid1 = repository.deterministicServerGuid("DE", "de-wg")
+        val guid2 = repository.deterministicServerGuid("de", "de-wg")
+        val guidDifferent = repository.deterministicServerGuid("DE", "de-masque")
+        assertEquals(guid1, guid2, "Deterministic GUID must be stable across refreshes for the same country and server ID")
+        assertFalse(guid1 == guidDifferent, "Distinct server IDs must produce distinct GUIDs")
+    }
 }
+

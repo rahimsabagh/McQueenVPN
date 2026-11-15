@@ -1,0 +1,212 @@
+name: Android Release Build & Sign
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release version tag (e.g. v1.0.0-beta.2)"
+        required: false
+        default: "v1.0.0-beta.2"
+        type: string
+      publish_release:
+        description: "Publish signed APK and AAB to GitHub Releases"
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches:
+      - main
+      - master
+      - my-releases
+    tags:
+      - "v*"
+      - "V*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-sign:
+    name: Build & Sign Release APK and AAB
+    runs-on: ubuntu-latest
+    env:
+      GO_VERSION: "1.24"
+      NDK_VERSION: "27.2.12479018"
+      RELEASE_TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || 'v1.0.0-beta.2' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Set up Go
+        if: hashFiles('aether/psiphon-build.sh', 'aether/pt-build.sh') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Install Rust toolchain
+        if: hashFiles('aether/aether/Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Set up Android SDK and NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Build native libraries from submodules if present
+        run: |
+          if [[ -f "hev-socks5-tunnel/Android.mk" ]]; then
+            bash compile-hevtun.sh
+          fi
+          if [[ -f "aether/aether/Cargo.toml" ]]; then
+            bash compile-aether.sh
+          fi
+          if [[ -f "aether/psiphon-build.sh" ]]; then
+            bash compile-psiphon.sh
+          fi
+          if [[ -f "aether/pt-build.sh" ]]; then
+            bash compile-pt.sh
+          fi
+          mkdir -p app/libs
+          for directory in libs libs-aether libs-psiphon libs-pt; do
+            if [[ -d "$directory" ]]; then
+              cp -R "$directory"/. app/libs/
+            fi
+          done
+
+      - name: Run JVM unit tests
+        run: |
+          gradle --no-daemon -PmcqueenVersionName="${RELEASE_TAG}" :app:testDebugUnitTest
+
+      - name: Prepare Release Keystore & Environment Variables
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 || secrets.APP_KEYSTORE_BASE64 }}
+          CONFIGURED_STORE_FILE: ${{ secrets.RELEASE_STORE_FILE }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || secrets.APP_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.APP_KEYSTORE_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.APP_KEY_PASSWORD }}
+        run: |
+          umask 077
+          store_path="${GITHUB_WORKSPACE}/release.jks"
+          if [[ -n "$KEYSTORE_BASE64" ]]; then
+            printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$store_path"
+            cp "$store_path" "$RUNNER_TEMP/release.jks"
+          fi
+
+          if [[ -n "$CONFIGURED_STORE_FILE" ]]; then
+            # Ensure target path exists if relative like ../release.jks
+            resolved_dir="$(dirname "${GITHUB_WORKSPACE}/app/${CONFIGURED_STORE_FILE}")"
+            mkdir -p "$resolved_dir"
+            if [[ -f "$store_path" && ! -f "${GITHUB_WORKSPACE}/app/${CONFIGURED_STORE_FILE}" ]]; then
+              cp "$store_path" "${GITHUB_WORKSPACE}/app/${CONFIGURED_STORE_FILE}" || true
+            fi
+            effective_store_file="$CONFIGURED_STORE_FILE"
+          else
+            effective_store_file="../release.jks"
+          fi
+
+          if [[ -f "$store_path" && -n "$RELEASE_STORE_PASSWORD" && -n "$RELEASE_KEY_ALIAS" && -n "$RELEASE_KEY_PASSWORD" ]]; then
+            echo "has_release_signing=true" >> "$GITHUB_OUTPUT"
+            echo "RELEASE_STORE_FILE=$effective_store_file" >> "$GITHUB_ENV"
+          else
+            echo "has_release_signing=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and Sign Release APK & AAB
+        if: steps.signing.outputs.has_release_signing == 'true'
+        env:
+          RELEASE_STORE_FILE: ${{ env.RELEASE_STORE_FILE }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || secrets.APP_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.APP_KEYSTORE_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.APP_KEY_PASSWORD }}
+        run: |
+          gradle --no-daemon \
+            -PmcqueenVersionName="${RELEASE_TAG}" \
+            :app:assembleRelease \
+            :app:bundleRelease
+
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/app-release.apk"
+          cp app/build/outputs/apk/release/app-release.apk "dist/McQueenVPN-${RELEASE_TAG}.apk"
+          cp app/build/outputs/bundle/release/app-release.aab "dist/McQueenVPN-${RELEASE_TAG}.aab"
+
+          jarsigner -verify "dist/app-release.apk"
+          jarsigner -verify "dist/McQueenVPN-${RELEASE_TAG}.aab"
+
+      - name: Fallback Debug Build (when release signing secrets are not set)
+        if: steps.signing.outputs.has_release_signing != 'true'
+        run: |
+          echo "::warning::Release signing secrets (RELEASE_KEYSTORE_BASE64, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD) are not configured. Building debug-signed APK instead."
+          gradle --no-daemon -PmcqueenVersionName="${RELEASE_TAG}" :app:assembleDebug
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/McQueenVPN-${RELEASE_TAG}-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/app-release.apk"
+
+      - name: Verify Native Libraries & Generate Checksums
+        run: |
+          apk="dist/app-release.apk"
+          entries="$(unzip -Z1 "$apk" | grep '^lib/' || true)"
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            for lib in libaether.so libpsiphon-tunnel-core.so liblyrebird.so libhev-socks5-tunnel.so; do
+              if ! echo "$entries" | grep -qx "lib/$abi/$lib"; then
+                echo "::error::$(basename "$apk") is missing lib/$abi/$lib"
+                exit 1
+              fi
+            done
+          done
+
+          (
+            cd dist
+            sha256sum * | tee SHA256SUMS.txt
+          )
+
+      - name: Clean up temporary keystore files
+        if: always()
+        run: |
+          rm -f "${GITHUB_WORKSPACE}/release.jks" "$RUNNER_TEMP/release.jks"
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: McQueenVPN-${{ env.RELEASE_TAG }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: McQueen VPN ${{ env.RELEASE_TAG }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+          generate_release_notes: true
+          files: dist/*

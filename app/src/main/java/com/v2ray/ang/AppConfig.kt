@@ -115,6 +115,9 @@ object AppConfig {
     const val PREF_MCQUEEN_SELECTED_COUNTRY = "pref_mcqueen_selected_country"
     const val PREF_MCQUEEN_MANIFEST_CACHE = "pref_mcqueen_manifest_cache"
     const val PREF_MCQUEEN_MANIFEST_TOKEN = "pref_mcqueen_manifest_token"
+    const val PREF_MCQUEEN_SELECTED_COUNTRY_CODE = "pref_mcqueen_selected_country_code"
+    const val PREF_MCQUEEN_BATTERY_PROMPT_SHOWN = "pref_mcqueen_battery_prompt_shown"
+    const val PREF_MCQUEEN_BYPASS_IRAN = "pref_mcqueen_bypass_iran"
 
     /** Protocol identifiers. */
     const val PROTOCOL_FREEDOM = "freedom"
@@ -158,6 +161,7 @@ object AppConfig {
     const val ANDROID_PACKAGE_NAME_LIST_URL = "$GITHUB_RAW_URL/2dust/androidpackagenamelist/master/proxy.txt"
     const val APP_URL = "$GITHUB_URL/rahimsabagh/McQueenVPN"
     const val APP_API_URL = "https://api.github.com/repos/rahimsabagh/McQueenVPN/releases"
+    const val APP_LATEST_RELEASE_API_URL = "$APP_API_URL/latest"
     const val APP_ISSUES_URL = "$APP_URL/issues"
     const val AETHER_URL = "$GITHUB_URL/CluvexStudio/aether"
     const val APP_WIKI_MODE = "$APP_URL/wiki/Mode"
@@ -180,8 +184,10 @@ object AppConfig {
     const val DNS_VPN = "8.8.8.8"
     const val GEOSITE_PRIVATE = "geosite:private"
     const val GEOSITE_CN = "geosite:cn"
+    const val GEOSITE_CATEGORY_IR = "geosite:category-ir"
     const val GEOIP_PRIVATE = "geoip:private"
     const val GEOIP_CN = "geoip:cn"
+    const val GEOIP_IR = "geoip:ir"
 
     /** Geo data file names. */
     const val GEOSITE_DAT = "geosite.dat"
@@ -224,6 +230,9 @@ object AppConfig {
     /** Shared defaults for settings shown in the UI and consumed by config generation. */
     const val DEFAULT_SOCKS_ENABLE_UDP = true
     const val DEFAULT_IPV6_ENABLED = true
+    const val DEFAULT_SPEED_ENABLED = true
+    const val DEFAULT_MCQUEEN_BYPASS_IRAN = true
+    const val DEFAULT_UI_MODE_NIGHT = "0"
     const val DEFAULT_OUTBOUND_DOMAIN_RESOLVE_METHOD = "0"
     const val DEFAULT_VPN_BYPASS_LAN = "1"
     const val DEFAULT_HEV_TUNNEL_LOGLEVEL = "warn"

@@ -1,27 +1,20 @@
 package com.v2ray.ang.ui.compose
 
 import android.app.Activity
-import android.os.Build
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Modifier
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
@@ -33,275 +26,382 @@ import androidx.core.view.WindowCompat
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
 import com.v2ray.ang.handler.MmkvManager
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import com.v2ray.ang.handler.SettingsChangeManager
 
-// McQueen VPN Brand Fonts
-val DisplayFontFamily = FontFamily(
+// =========================================================================
+// MCQUEEN — Effortless Performance Design Tokens
+// Inspired by precision automotive cockpits & anodized graphite hardware
+// =========================================================================
+
+// Core Brand & Surface Tokens (Preserved Spec Constants)
+val McQueenGraphiteBlack = Color(0xFF111416)    // #111416 Spec Graphite Black
+val McQueenDeepSurface = Color(0xFF191E22)      // #191E22 Spec Deep Surface
+val McQueenElevatedSurface = Color(0xFF20272D)  // #20272D Spec Elevated Surface
+val McQueenRacingRed = Color(0xFF941E29)        // #941E29 Spec Restrained Brand Accent
+val McQueenTitaniumWhite = Color(0xFFD9DADD)    // #D9DADD Spec Titanium White
+val McQueenSecondaryText = Color(0xFF929BA3)    // #929BA3 Spec Secondary Text
+
+// Obsidian Mockup Surfaces & Borders (MCQUEEN VPN Redesign)
+val McQueenObsidianBlack = Color(0xFF09090B)
+val McQueenDialWellDark = Color(0xFF0B0B0E)
+val McQueenCardSurfaceDark = Color(0xFF101014)
+val McQueenCardConnectingDark = Color(0xFF15120B)
+val McQueenCardConnectedDark = Color(0xFF160B0D)
+val McQueenControlSurfaceDark = Color(0xFF131317)
+val McQueenButtonSurfaceDark = Color(0xFF1B1B21)
+val McQueenHairlineBorder = Color(0xFF23232A)
+val McQueenControlBorderDark = Color(0xFF25252C)
+val McQueenPillBorderDark = Color(0xFF2A2A31)
+val McQueenSubtleDivider = Color(0xFF25252C)
+val McQueenButtonBorderDark = Color(0xFF2F2F38)
+
+// Text Hierarchy Tokens (Dark Mode)
+val McQueenPrimaryInkDark = Color(0xFFF4F4F5)
+val McQueenSecondaryInkDark = Color(0xFFD4D4D8)
+val McQueenMutedInkDark = Color(0xFFA1A1AA)
+val McQueenOverlineInkDark = Color(0xFF9CA3AF)
+val McQueenInactiveTimerDark = Color(0xFF8B8B95)
+
+val McQueenCrimsonReadable = Color(0xFFFF6A75)
+val McQueenCrimsonLight = Color(0xFF941E29)
+
+// Light Mode Companion Tokens
+val McQueenLightBackground = Color(0xFFF4F4F6)
+val McQueenLightSurface = Color(0xFFFFFFFF)
+val McQueenLightElevatedSurface = Color(0xFFE9EAEE)
+val McQueenLightMainText = Color(0xFF111416)
+val McQueenLightSecondaryText = Color(0xFF525866)
+val McQueenLightBorder = Color(0xFFD5D7DD)
+
+// Semantic Status Accents — Disconnected (Gray) · Connecting (Yellow/Amber) · Connected (Red)
+val McQueenMockupAmber = Color(0xFFFBBF24)
+val McQueenMockupAmberText = Color(0xFFFCD34D)
+val McQueenMockupAmberLight = Color(0xFF9E6B00)
+val McQueenMockupRed = Color(0xFFEF3340)
+val McQueenMockupRedSoft = Color(0xFFFF8A93)
+val McQueenMockupRedIcon = Color(0xFFFF6A75)
+val McQueenMockupEmerald = Color(0xFF34D399)
+val McQueenMockupEmeraldLight = Color(0xFF059669)
+
+val McQueenConnectedTeal = McQueenMockupEmerald
+val McQueenConnectedLightTeal = McQueenMockupEmeraldLight
+val McQueenConnectedRedDark = McQueenMockupRed
+val McQueenConnectedRedLight = Color(0xFFC41622)
+val McQueenChampionshipGold = McQueenMockupAmber
+val McQueenChampionshipLightGold = McQueenMockupAmberLight
+val McQueenWarningAmber = McQueenMockupAmber
+val McQueenWarningLightAmber = McQueenMockupAmberLight
+val McQueenErrorCoral = Color(0xFFFF6A75)
+val McQueenErrorLight = Color(0xFFA6121C)
+
+// Hardware & Dial Tokens (Disconnected Gray · Connecting Yellow · Connected Red)
+val McQueenChassisDark = McQueenDialWellDark
+val McQueenChassisLight = Color(0xFFE7E9EC)
+val McQueenChassisRimDark = Color(0xFF24242B)
+val McQueenChassisRimLight = Color(0xFFCFD3D7)
+
+// Disconnected (Neutral Carbon Gray)
+val McQueenDisconnectedPlateDarkTop = Color(0xFF24242B)
+val McQueenDisconnectedPlateDarkBottom = Color(0xFF17171C)
+val McQueenDisconnectedBorderDark = Color(0xFF33333C)
+val McQueenDisconnectedTextDark = Color(0xFFF4F4F5)
+val McQueenDisconnectedPlateLightTop = Color(0xFFE4E6EA)
+val McQueenDisconnectedPlateLightBottom = Color(0xFFD0D4DA)
+val McQueenDisconnectedBorderLight = Color(0xFFA8AEB5)
+val McQueenDisconnectedTextLight = Color(0xFF16181A)
+
+// Connecting (Vibrant Amber/Yellow with High-Contrast Carbon Text)
+val McQueenConnectingPlateTop = Color(0xFFFCC934)
+val McQueenConnectingPlateBottom = Color(0xFFE8A410)
+val McQueenConnectingBorderDark = Color(0xFFFCD34D)
+val McQueenConnectingBorderLight = Color(0xFFB87F00)
+val McQueenConnectingLabelDark = Color(0xFF1C1300)
+
+// Connected (Vibrant McQueen Racing Red with Crisp White Text)
+val McQueenRacingRedBright = Color(0xFFEF3340)
+val McQueenRacingRedDeep = Color(0xFFB8121D)
+val McQueenRacingRedHighlight = Color(0xFFFF6A75)
+val McQueenConnectedPlateDarkTop = Color(0xFFE32A37)
+val McQueenConnectedPlateDarkBottom = Color(0xFFB8121D)
+val McQueenConnectedPlateLightTop = Color(0xFFD61F2B)
+val McQueenConnectedPlateLightBottom = Color(0xFFA2121B)
+val McQueenConnectedPlateLightText = Color(0xFFFFFFFF)
+
+// Compatibility aliases for existing references
+val McQueenConnectingPlateDarkTop = McQueenConnectingPlateTop
+val McQueenConnectingPlateDarkBottom = McQueenConnectingPlateBottom
+val McQueenConnectingPlateLightTop = McQueenConnectingPlateTop
+val McQueenConnectingPlateLightBottom = McQueenConnectingPlateBottom
+val McQueenConnectingFlameLight = McQueenChampionshipLightGold
+val McQueenFailedPlateDarkTop = McQueenDisconnectedPlateDarkTop
+val McQueenFailedPlateDarkBottom = McQueenDisconnectedPlateDarkBottom
+val McQueenFailedPlateLightTop = McQueenDisconnectedPlateLightTop
+val McQueenFailedPlateLightBottom = McQueenDisconnectedPlateLightBottom
+val McQueenFailedLightText = McQueenDisconnectedTextLight
+
+// Bundled Local Typography (from app/src/main/res/font/)
+val McQueenDisplayFont = FontFamily(
+    Font(R.font.space_grotesk, FontWeight.Normal),
     Font(R.font.space_grotesk, FontWeight.Medium),
     Font(R.font.space_grotesk, FontWeight.SemiBold),
     Font(R.font.space_grotesk, FontWeight.Bold),
 )
 
-val BodyFontFamily = FontFamily(
+val McQueenBodyFont = FontFamily(
     Font(R.font.plus_jakarta_sans, FontWeight.Normal),
     Font(R.font.plus_jakarta_sans, FontWeight.Medium),
     Font(R.font.plus_jakarta_sans, FontWeight.SemiBold),
+    Font(R.font.plus_jakarta_sans, FontWeight.Bold),
 )
 
-val MonoFontFamily = FontFamily(
+val McQueenMonoFont = FontFamily(
     Font(R.font.jetbrains_mono, FontWeight.Normal),
     Font(R.font.jetbrains_mono, FontWeight.Medium),
     Font(R.font.jetbrains_mono, FontWeight.SemiBold),
+    Font(R.font.jetbrains_mono, FontWeight.Bold),
 )
 
+private val McQueenDarkColorScheme = darkColorScheme(
+    primary = McQueenMockupRed,
+    onPrimary = Color.White,
+    primaryContainer = McQueenButtonSurfaceDark,
+    onPrimaryContainer = McQueenPrimaryInkDark,
+    secondary = McQueenSecondaryInkDark,
+    onSecondary = McQueenObsidianBlack,
+    secondaryContainer = McQueenButtonSurfaceDark,
+    onSecondaryContainer = McQueenPrimaryInkDark,
+    tertiary = McQueenMockupEmerald,
+    onTertiary = McQueenObsidianBlack,
+    tertiaryContainer = Color(0xFF132D24),
+    onTertiaryContainer = Color(0xFFCFF5E7),
+    background = McQueenObsidianBlack,
+    onBackground = McQueenPrimaryInkDark,
+    surface = McQueenCardSurfaceDark,
+    onSurface = McQueenPrimaryInkDark,
+    surfaceVariant = McQueenButtonSurfaceDark,
+    onSurfaceVariant = McQueenMutedInkDark,
+    surfaceContainerLowest = McQueenObsidianBlack,
+    surfaceContainerLow = McQueenCardSurfaceDark,
+    surfaceContainer = McQueenControlSurfaceDark,
+    surfaceContainerHigh = McQueenButtonSurfaceDark,
+    surfaceContainerHighest = Color(0xFF24242B),
+    outline = McQueenHairlineBorder,
+    outlineVariant = McQueenControlBorderDark,
+    error = McQueenErrorCoral,
+    onError = Color(0xFF28080C),
+    errorContainer = Color(0xFF3E161B),
+    onErrorContainer = Color(0xFFFFDADC),
+)
+
+private val McQueenLightColorScheme = lightColorScheme(
+    primary = McQueenRacingRed,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFF9E5E7),
+    onPrimaryContainer = Color(0xFF4A0D13),
+    secondary = McQueenLightMainText,
+    onSecondary = Color.White,
+    secondaryContainer = McQueenLightElevatedSurface,
+    onSecondaryContainer = McQueenLightMainText,
+    tertiary = McQueenMockupEmeraldLight,
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFD6F3E8),
+    onTertiaryContainer = Color(0xFF0B3D2C),
+    background = McQueenLightBackground,
+    onBackground = McQueenLightMainText,
+    surface = McQueenLightSurface,
+    onSurface = McQueenLightMainText,
+    surfaceVariant = McQueenLightElevatedSurface,
+    onSurfaceVariant = McQueenLightSecondaryText,
+    surfaceContainerLowest = Color.White,
+    surfaceContainerLow = McQueenLightBackground,
+    surfaceContainer = McQueenLightSurface,
+    surfaceContainerHigh = McQueenLightElevatedSurface,
+    surfaceContainerHighest = Color(0xFFD9DFE5),
+    outline = McQueenLightBorder,
+    outlineVariant = Color(0xFFE3E7EC),
+    error = McQueenErrorLight,
+    onError = Color.White,
+    errorContainer = Color(0xFFFCE6E8),
+    onErrorContainer = Color(0xFF5A0F17),
+)
+
+// Accessible Typography Scale (14–16sp+ for key information, respects system font scaling)
 private val McQueenTypography = Typography(
-    displaySmall = TextStyle(
-        fontFamily = DisplayFontFamily,
+    headlineLarge = TextStyle(
+        fontFamily = McQueenDisplayFont,
         fontWeight = FontWeight.Bold,
-        fontSize = 32.sp,
-        lineHeight = 38.sp,
-        letterSpacing = (-0.5).sp,
-    ),
-    headlineMedium = TextStyle(
-        fontFamily = DisplayFontFamily,
-        fontWeight = FontWeight.Bold,
-        fontSize = 24.sp,
-        lineHeight = 30.sp,
+        fontSize = 28.sp,
+        lineHeight = 34.sp,
         letterSpacing = (-0.25).sp,
     ),
-    titleLarge = TextStyle(
-        fontFamily = DisplayFontFamily,
+    headlineMedium = TextStyle(
+        fontFamily = McQueenDisplayFont,
         fontWeight = FontWeight.SemiBold,
+        fontSize = 22.sp,
+        lineHeight = 28.sp,
+        letterSpacing = (-0.15).sp,
+    ),
+    titleLarge = TextStyle(
+        fontFamily = McQueenDisplayFont,
+        fontWeight = FontWeight.Bold,
         fontSize = 20.sp,
         lineHeight = 26.sp,
+        letterSpacing = 0.sp,
     ),
     titleMedium = TextStyle(
-        fontFamily = BodyFontFamily,
+        fontFamily = McQueenBodyFont,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 16.sp,
-        lineHeight = 22.sp,
+        fontSize = 17.sp,
+        lineHeight = 23.sp,
+        letterSpacing = 0.sp,
+    ),
+    titleSmall = TextStyle(
+        fontFamily = McQueenBodyFont,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 15.sp,
+        lineHeight = 21.sp,
+        letterSpacing = 0.1.sp,
     ),
     bodyLarge = TextStyle(
-        fontFamily = BodyFontFamily,
+        fontFamily = McQueenBodyFont,
+        fontWeight = FontWeight.Normal,
+        fontSize = 16.sp,
+        lineHeight = 24.sp,
+        letterSpacing = 0.15.sp,
+    ),
+    bodyMedium = TextStyle(
+        fontFamily = McQueenBodyFont,
         fontWeight = FontWeight.Normal,
         fontSize = 15.sp,
         lineHeight = 22.sp,
+        letterSpacing = 0.15.sp,
     ),
-    bodyMedium = TextStyle(
-        fontFamily = BodyFontFamily,
+    bodySmall = TextStyle(
+        fontFamily = McQueenBodyFont,
         fontWeight = FontWeight.Normal,
         fontSize = 13.sp,
-        lineHeight = 18.sp,
+        lineHeight = 19.sp,
+        letterSpacing = 0.2.sp,
     ),
     labelLarge = TextStyle(
-        fontFamily = BodyFontFamily,
+        fontFamily = McQueenDisplayFont,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 14.sp,
+        fontSize = 15.sp,
         lineHeight = 20.sp,
+        letterSpacing = 0.15.sp,
     ),
     labelMedium = TextStyle(
-        fontFamily = BodyFontFamily,
+        fontFamily = McQueenBodyFont,
+        fontWeight = FontWeight.Medium,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+        letterSpacing = 0.25.sp,
+    ),
+    labelSmall = TextStyle(
+        fontFamily = McQueenBodyFont,
         fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
         lineHeight = 16.sp,
-    ),
-    labelSmall = TextStyle(
-        fontFamily = BodyFontFamily,
-        fontWeight = FontWeight.Medium,
-        fontSize = 11.sp,
-        lineHeight = 14.sp,
+        letterSpacing = 0.3.sp,
     ),
 )
 
 private val McQueenShapes = Shapes(
+    extraSmall = RoundedCornerShape(8.dp),
     small = RoundedCornerShape(12.dp),
-    medium = RoundedCornerShape(18.dp),
-    large = RoundedCornerShape(24.dp),
-    extraLarge = RoundedCornerShape(32.dp),
+    medium = RoundedCornerShape(16.dp),
+    large = RoundedCornerShape(20.dp),
+    extraLarge = RoundedCornerShape(26.dp),
 )
-
-// Obsidian Stealth Dark Palette (Primary Experience)
-private val McQueenDarkColors = darkColorScheme(
-    primary = Color(0xFFFF4D4D),
-    onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFF421216),
-    onPrimaryContainer = Color(0xFFFFDAD6),
-    secondary = Color(0xFF00D4FF),
-    onSecondary = Color(0xFF00242E),
-    secondaryContainer = Color(0xFF093645),
-    onSecondaryContainer = Color(0xFFBDF2FF),
-    tertiary = Color(0xFF00D68F),
-    onTertiary = Color(0xFF00291A),
-    tertiaryContainer = Color(0xFF073B28),
-    onTertiaryContainer = Color(0xFF9BF6CE),
-    error = Color(0xFFFF6B6B),
-    onError = Color(0xFF3F0005),
-    errorContainer = Color(0xFF4F1317),
-    onErrorContainer = Color(0xFFFFDAD6),
-    background = Color(0xFF090C12),
-    onBackground = Color(0xFFF2F5FA),
-    surface = Color(0xFF0E131D),
-    onSurface = Color(0xFFF2F5FA),
-    surfaceVariant = Color(0xFF1A2232),
-    onSurfaceVariant = Color(0xFF9AA7BD),
-    outline = Color(0xFF2D384D),
-    outlineVariant = Color(0xFF1F2838),
-    inverseSurface = Color(0xFFF2F5FA),
-    inverseOnSurface = Color(0xFF0E131D),
-    inversePrimary = Color(0xFFD92638),
-    surfaceContainerLowest = Color(0xFF070A0F),
-    surfaceContainerLow = Color(0xFF101622),
-    surfaceContainer = Color(0xFF151C2B),
-    surfaceContainerHigh = Color(0xFF1C2538),
-    surfaceContainerHighest = Color(0xFF232E45),
-)
-
-// Crisp Daylight Palette (Light Mode Support)
-private val McQueenLightColors = lightColorScheme(
-    primary = Color(0xFFD92638),
-    onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFFFE5E7),
-    onPrimaryContainer = Color(0xFF4A060D),
-    secondary = Color(0xFF007EA7),
-    onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFD9F3FF),
-    onSecondaryContainer = Color(0xFF002533),
-    tertiary = Color(0xFF008F5D),
-    onTertiary = Color(0xFFFFFFFF),
-    tertiaryContainer = Color(0xFFCFFAEA),
-    onTertiaryContainer = Color(0xFF002819),
-    error = Color(0xFFC62828),
-    onError = Color(0xFFFFFFFF),
-    errorContainer = Color(0xFFFFDAD6),
-    onErrorContainer = Color(0xFF410002),
-    background = Color(0xFFF6F8FC),
-    onBackground = Color(0xFF0F172A),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF0F172A),
-    surfaceVariant = Color(0xFFE7ECF5),
-    onSurfaceVariant = Color(0xFF52607A),
-    outline = Color(0xFFCBD5E1),
-    outlineVariant = Color(0xFFE2E8F0),
-    inverseSurface = Color(0xFF151C2B),
-    inverseOnSurface = Color(0xFFF8FAFC),
-    inversePrimary = Color(0xFFFF7A85),
-    surfaceContainerLowest = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFF1F5FB),
-    surfaceContainer = Color(0xFFEBF0F8),
-    surfaceContainerHigh = Color(0xFFE2E8F3),
-    surfaceContainerHighest = Color(0xFFD9E1EE),
-)
-
-// Semantic McQueen VPN State Colors
-object McQueenSemanticColors {
-    val Connected = Color(0xFF00D68F)
-    val Connecting = Color(0xFF00C2FF)
-    val Reconnecting = Color(0xFFFFB020)
-    val Failed = Color(0xFFFF5252)
-    val DisconnectedDark = Color(0xFF7C8AA5)
-    val DisconnectedLight = Color(0xFF64748B)
-    val CrimsonAccent = Color(0xFFFF3D4E)
-}
-
-// Toast Colors 90%
-val toastNormalBgLight = Color(0xE61E293B)
-val toastNormalBgDark = Color(0xE6263248)
-val toastSuccessBg = Color(0xE6059669)
-val toastErrorBg = Color(0xE6DC2626)
-val toastInfoBg = Color(0xE60284C7)
-val toastTextColor = Color.White
 
 object ThemeManager {
-    private const val DEFAULT_THEME_MODE = "2" // Dark mode primary
-    private const val DEFAULT_DYNAMIC_COLOR = false
+    const val MODE_SYSTEM = "0"
+    const val MODE_LIGHT = "1"
+    const val MODE_DARK = "2"
 
-    private val _themeMode = MutableStateFlow(
-        MmkvManager.decodeSettingsString(AppConfig.PREF_UI_MODE_NIGHT, DEFAULT_THEME_MODE)
-            ?: DEFAULT_THEME_MODE
-    )
-    val themeMode: StateFlow<String> = _themeMode.asStateFlow()
+    private val _themeModeState = mutableStateOf(readPersistedMode())
+    val themeMode: String
+        get() = _themeModeState.value
 
-    private val _dynamicColorEnabled = MutableStateFlow(
-        MmkvManager.decodeSettingsBool(AppConfig.PREF_DYNAMIC_COLOR, DEFAULT_DYNAMIC_COLOR)
-    )
-    val dynamicColorEnabled: StateFlow<Boolean> = _dynamicColorEnabled.asStateFlow()
-
-    fun setThemeMode(mode: String) {
-        MmkvManager.encodeSettings(AppConfig.PREF_UI_MODE_NIGHT, mode)
-        _themeMode.value = mode
+    fun normalizeMode(rawMode: String?): String {
+        return when (rawMode?.trim()) {
+            MODE_LIGHT, "light", "no" -> MODE_LIGHT
+            MODE_DARK, "dark", "yes" -> MODE_DARK
+            else -> MODE_SYSTEM
+        }
     }
 
-    fun setDynamicColorEnabled(enabled: Boolean) {
-        MmkvManager.encodeSettings(AppConfig.PREF_DYNAMIC_COLOR, enabled)
-        _dynamicColorEnabled.value = enabled
+    fun resolveDarkTheme(mode: String, systemInDarkTheme: Boolean): Boolean {
+        return when (normalizeMode(mode)) {
+            MODE_LIGHT -> false
+            MODE_DARK -> true
+            else -> systemInDarkTheme
+        }
+    }
+
+    fun resolveNightModeFlag(mode: String): Int {
+        return when (normalizeMode(mode)) {
+            MODE_LIGHT -> AppCompatDelegate.MODE_NIGHT_NO
+            MODE_DARK -> AppCompatDelegate.MODE_NIGHT_YES
+            else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+        }
     }
 
     fun refresh() {
-        _themeMode.value =
-            MmkvManager.decodeSettingsString(AppConfig.PREF_UI_MODE_NIGHT, DEFAULT_THEME_MODE)
-                ?: DEFAULT_THEME_MODE
-        _dynamicColorEnabled.value =
-            MmkvManager.decodeSettingsBool(AppConfig.PREF_DYNAMIC_COLOR, DEFAULT_DYNAMIC_COLOR)
+        val current = readPersistedMode()
+        _themeModeState.value = current
+        applyAppCompatNightMode(current)
+    }
+
+    fun setThemeMode(mode: String) {
+        val normalized = normalizeMode(mode)
+        MmkvManager.encodeSettings(AppConfig.PREF_UI_MODE_NIGHT, normalized)
+        _themeModeState.value = normalized
+        SettingsChangeManager.notifySettingChanged(AppConfig.PREF_UI_MODE_NIGHT)
+        applyAppCompatNightMode(normalized)
+    }
+
+    private fun readPersistedMode(): String {
+        val stored = runCatching {
+            MmkvManager.decodeSettingsString(AppConfig.PREF_UI_MODE_NIGHT, AppConfig.DEFAULT_UI_MODE_NIGHT)
+        }.getOrDefault(AppConfig.DEFAULT_UI_MODE_NIGHT)
+        return normalizeMode(stored)
+    }
+
+    private fun applyAppCompatNightMode(mode: String) {
+        runCatching {
+            val targetNightMode = resolveNightModeFlag(mode)
+            if (AppCompatDelegate.getDefaultNightMode() != targetNightMode) {
+                AppCompatDelegate.setDefaultNightMode(targetNightMode)
+            }
+        }
     }
 }
-
-@Composable
-fun resolveDarkTheme(): Boolean {
-    val mode by ThemeManager.themeMode.collectAsState()
-    return when (mode) {
-        "1" -> false
-        "2" -> true
-        else -> isSystemInDarkTheme()
-    }
-}
-
-val LocalDarkTheme = compositionLocalOf { true }
 
 @Composable
 fun AppTheme(
-    darkTheme: Boolean = resolveDarkTheme(),
+    darkTheme: Boolean? = null,
     content: @Composable () -> Unit
 ) {
-    val dynamicColor by ThemeManager.dynamicColorEnabled.collectAsState()
-    val context = LocalContext.current
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-
-        darkTheme -> McQueenDarkColors
-        else -> McQueenLightColors
-    }
-    val snackbarController = rememberAppSnackbarController()
+    val systemDark = isSystemInDarkTheme()
+    val isDark = darkTheme ?: ThemeManager.resolveDarkTheme(ThemeManager.themeMode, systemDark)
+    val colorScheme = if (isDark) McQueenDarkColorScheme else McQueenLightColorScheme
 
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
-            val activity = view.context as? Activity ?: return@SideEffect
-            val window = activity.window
-            WindowCompat.getInsetsController(window, view).apply {
-                isAppearanceLightStatusBars = !darkTheme
-                isAppearanceLightNavigationBars = !darkTheme
-            }
+            val window = (view.context as? Activity)?.window ?: return@SideEffect
+            window.decorView.setBackgroundColor(colorScheme.background.toArgb())
+            val insetsController = WindowCompat.getInsetsController(window, view)
+            insetsController.isAppearanceLightStatusBars = !isDark
+            insetsController.isAppearanceLightNavigationBars = !isDark
         }
     }
 
-    CompositionLocalProvider(
-        LocalDarkTheme provides darkTheme,
-        LocalAppSnackbar provides snackbarController
-    ) {
-        MaterialTheme(
-            colorScheme = colorScheme,
-            typography = McQueenTypography,
-            shapes = McQueenShapes,
-        ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                AppSnackbarBridge(controller = snackbarController)
-                content()
-                AppSnackbarHost(hostState = snackbarController.hostState)
-            }
-        }
-    }
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = McQueenTypography,
+        shapes = McQueenShapes,
+        content = content
+    )
 }

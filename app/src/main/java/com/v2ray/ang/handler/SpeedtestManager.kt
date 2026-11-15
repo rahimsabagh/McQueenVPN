@@ -54,13 +54,14 @@ object SpeedtestManager {
     }
 
     fun getRemoteIPInfo(): RemoteEndpointInfo? {
+        if (!SettingsManager.isLocalProxyKept()) return null
         val url = MmkvManager.decodeSettingsString(AppConfig.PREF_IP_API_URL)
             .takeIf { !it.isNullOrBlank() } ?: AppConfig.IP_API_URL
 
         val proxyUsername = SettingsManager.getSocksUsername()
         val proxyPassword = SettingsManager.getSocksPassword()
         val httpPort = SettingsManager.getHttpPort()
-        if (httpPort == 0) return null
+        if (httpPort !in 1..65535) return null
         val content = HttpUtil.getUrlContent(
             UrlContentRequest(
                 url = url,

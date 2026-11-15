@@ -3,97 +3,152 @@ package com.v2ray.ang.service
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.contracts.ServiceControl
 import com.v2ray.ang.core.CoreServiceManager
 import com.v2ray.ang.handler.AppLocaleManager
 import com.v2ray.ang.handler.NotificationManager
+import com.v2ray.ang.helper.MessageHelper
 import com.v2ray.ang.root.RootProxyManager
 import com.v2ray.ang.util.LogUtil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import java.lang.ref.SoftReference
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
-/**
- * Foreground service for the root (system-wide) run modes. Unlike [CoreVpnService] it
- * does not use Android VpnService — traffic is routed by iptables instead
- * (see [RootProxyManager]).
- *
- * The in-process core is started first (so its listener is up and the foreground
- * notification is posted promptly), then the root routing rules are installed off the
- * main thread. On teardown the rules are removed before the core stops.
- */
 class CoreRootService : Service(), ServiceControl {
-
-    private var setupJob: Job? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var rootStartupJob: Job? = null
+    private val startGate = DaemonStartGate()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val serviceExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "mcqueen-root-service").apply { isDaemon = true }
+    }
 
     override fun onCreate() {
         super.onCreate()
-        LogUtil.i(AppConfig.TAG, "StartCore-Root: Service created")
+        startGate.resetOnCreate()
         CoreServiceManager.serviceControl = SoftReference(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        NotificationManager.ensureForeground()
-        LogUtil.i(AppConfig.TAG, "StartCore-Root: command received")
-
-        // A reload has Xray stopped for a moment; a start on top of it would run beside the reload and
-        // take the root rules and the tunnel down to install them again, with the traffic unrouted meanwhile.
-        if (CoreServiceManager.isServiceRunning()) {
-            LogUtil.i(AppConfig.TAG, "StartCore-Root: Core is already running")
-            return START_STICKY
-        }
-
-        // Start the in-process core first (this also posts the foreground notification),
-        // then install the root routing off the main thread.
-        if (!CoreServiceManager.startCoreLoop(null)) {
-            LogUtil.e(AppConfig.TAG, "StartCore-Root: core failed to start")
-            stopService()
+        NotificationManager.ensureForeground(this)
+        val opGen = startGate.beginStart(startId)
+        if (opGen < 0L) {
+            scheduleStopForegroundAndSelf(startGate.currentGeneration(), startId)
             return START_NOT_STICKY
         }
-
-        setupJob = CoroutineScope(Dispatchers.IO).launch {
-            if (!RootProxyManager.start(this@CoreRootService)) {
-                LogUtil.e(AppConfig.TAG, "StartCore-Root: failed to start root mode, stopping")
-                stopService()
-            }
+        serviceExecutor.execute {
+            performStart(opGen, startId)
         }
-
         return START_STICKY
     }
 
     override fun onDestroy() {
+        val wasRunning = CoreServiceManager.isServiceRunning()
+        startGate.markDestroyed()
+        runCatching {
+            serviceExecutor.submit {
+                stopInternal(forceRootStop = wasRunning || CoreServiceManager.isServiceRunning())
+            }.get(2_500L, TimeUnit.MILLISECONDS)
+        }
+        NotificationManager.cancelNotification(this)
+        if (CoreServiceManager.serviceControl?.get() === this) {
+            CoreServiceManager.serviceControl = null
+        }
+        serviceScope.cancel()
+        serviceExecutor.shutdownNow()
         super.onDestroy()
-        // Wait for any in-flight async setup to finish before tearing down. The rules are
-        // installed off the main thread and can take seconds (the setup script waits for the
-        // tun to appear); if a stop arrives during that window, teardown would run first and
-        // the setup would then re-install the rules + tun pointing at a now-dead core,
-        // blackholing all traffic until the next start/stop cycle clears it.
-        runBlocking { setupJob?.cancelAndJoin() }
-        // Remove routing rules BEFORE stopping the core so traffic is never redirected
-        // to a dead listener. Synchronous on purpose — leaving rules behind breaks the net.
-        RootProxyManager.stop(this)
-        CoreServiceManager.stopCoreLoop()
     }
 
-    override fun getService(): Service = this
+    override fun getService(): Service {
+        return this
+    }
 
     override fun startService() {
-        // do nothing
+        NotificationManager.ensureForeground(this)
+        val startId = startGate.currentStartId()
+        val opGen = startGate.beginStart(startId)
+        if (opGen < 0L) return
+        serviceExecutor.execute {
+            performStart(opGen, startId)
+        }
     }
 
     override fun stopService() {
-        stopSelf()
+        val stopGen = startGate.beginStop()
+        val stopStartId = startGate.currentStartId()
+        serviceExecutor.execute {
+            stopInternal(forceRootStop = true)
+            scheduleStopForegroundAndSelf(stopGen, stopStartId)
+        }
     }
 
-    override fun vpnProtect(socket: Int): Boolean = true
+    private fun performStart(opGen: Long, startId: Int) {
+        if (!startGate.shouldContinueStart(opGen)) return
+        if (CoreServiceManager.isServiceRunning()) {
+            stopInternal(forceRootStop = true)
+        }
+        if (!startGate.shouldContinueStart(opGen)) return
 
-    override fun onBind(intent: Intent?): IBinder? = null
+        rootStartupJob?.cancel()
+        if (!CoreServiceManager.startCoreLoop(null)) {
+            stopInternal(forceRootStop = false)
+            scheduleStopForegroundAndSelf(opGen, startId)
+            return
+        }
+
+        if (!startGate.shouldContinueStart(opGen)) {
+            stopInternal(forceRootStop = true)
+            return
+        }
+
+        rootStartupJob = serviceScope.launch {
+            if (!RootProxyManager.start(this@CoreRootService)) {
+                LogUtil.e(AppConfig.TAG, "RootProxyManager failed to start, stopping CoreRootService")
+                MessageHelper.sendMsg2UI(this@CoreRootService, AppConfig.MSG_STATE_START_FAILURE, "")
+                stopService()
+            }
+        }
+    }
+
+    private fun stopInternal(forceRootStop: Boolean) {
+        rootStartupJob?.cancel()
+        rootStartupJob = null
+        if (forceRootStop || CoreServiceManager.isServiceRunning()) {
+            RootProxyManager.stop(this)
+            CoreServiceManager.stopCoreLoop(cancelForeground = false)
+        }
+    }
+
+    private fun scheduleStopForegroundAndSelf(expectedGen: Long, startId: Int) {
+        mainHandler.post {
+            if (startGate.shouldStopSelf(expectedGen)) {
+                NotificationManager.cancelNotification(this)
+                if (startId > 0) {
+                    stopSelfResult(startId)
+                } else {
+                    stopSelf()
+                }
+            }
+        }
+    }
+
+    override fun vpnProtect(socket: Int): Boolean {
+        return true
+    }
+
+    override fun onBind(intent: Intent?): IBinder? {
+        return null
+    }
 
     override fun attachBaseContext(newBase: Context?) {
         val context = newBase?.let(AppLocaleManager::localizedContext)

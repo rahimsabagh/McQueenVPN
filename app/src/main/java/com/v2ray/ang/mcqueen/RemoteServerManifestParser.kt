@@ -56,7 +56,7 @@ object RemoteServerManifestParser {
      */
     fun parse(
         json: String,
-        isAetherSupported: Boolean,
+        isAetherSupported: Boolean = true,
         subscriptionId: String = AppConfig.MCQUEEN_SUBSCRIPTION_ID,
         verifyOutbound: (ProfileItem) -> Boolean = { true },
     ): ManifestParseResult {
@@ -123,7 +123,7 @@ object RemoteServerManifestParser {
 
     internal fun validateAndParseEntry(
         entry: RemoteServerEntryDto?,
-        isAetherSupported: Boolean,
+        isAetherSupported: Boolean = true,
         subscriptionId: String = AppConfig.MCQUEEN_SUBSCRIPTION_ID,
         verifyOutbound: (ProfileItem) -> Boolean = { true },
     ): ValidatedServer? {

@@ -5,629 +5,1031 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
-import com.v2ray.ang.core.AetherIdentityProvisioner
+import com.v2ray.ang.core.BypassIranRoutingHelper
+import com.v2ray.ang.core.CoreServiceManager
 import com.v2ray.ang.core.LauncherManager
-import com.v2ray.ang.dto.ConnectionTestResult
+import com.v2ray.ang.core.TunnelProbePolicy
 import com.v2ray.ang.dto.TrafficStatsSnapshot
-import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.extension.serializable
 import com.v2ray.ang.handler.MmkvManager
+import com.v2ray.ang.handler.SettingsChangeManager
 import com.v2ray.ang.handler.SettingsManager
+import com.v2ray.ang.helper.BatteryOptimizationHelper
 import com.v2ray.ang.helper.MessageHelper
+import com.v2ray.ang.mcqueen.AppUpdateCheckResult
+import com.v2ray.ang.mcqueen.AppUpdateChecker
 import com.v2ray.ang.mcqueen.ConnectionSessionCoordinator
 import com.v2ray.ang.mcqueen.CountryIdentityStatus
 import com.v2ray.ang.mcqueen.CountryUiModel
 import com.v2ray.ang.mcqueen.FailoverDecision
+import com.v2ray.ang.mcqueen.GitHubReleaseParser
 import com.v2ray.ang.mcqueen.ManifestSyncOutcome
 import com.v2ray.ang.mcqueen.McQueenManifestUpdater
-import com.v2ray.ang.mcqueen.McQueenServerConfig
 import com.v2ray.ang.mcqueen.McQueenServerRepository
 import com.v2ray.ang.mcqueen.VpnConnectionState
-import com.v2ray.ang.ui.base.BaseViewModel
 import com.v2ray.ang.ui.compose.ThemeManager
 import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class McQueenUiState(
     val connectionState: VpnConnectionState = VpnConnectionState.DISCONNECTED,
-    val statusDetail: String? = null,
-    val countries: List<CountryUiModel> = emptyList(),
+    val statusDetail: String = "",
     val selectedCountry: CountryUiModel? = null,
+    val countries: List<CountryUiModel> = emptyList(),
+    val isSyncingManifest: Boolean = false,
+    val manifestErrorMessage: String? = null,
+    val lastSyncUpdatedAt: String = "",
+    val manifestSourceUrl: String = "",
+    val hasAuthToken: Boolean = false,
     val downloadBps: Long = 0L,
     val uploadBps: Long = 0L,
-    val sessionStartMs: Long = 0L,
-    val sessionDurationText: String = "00:00:00",
-    val isSyncing: Boolean = false,
-    val syncError: String? = null,
-    val manifestUpdatedAt: String? = null,
-    val manifestUrl: String = "",
-    val manifestHasAuthToken: Boolean = false,
-    val autoBootEnabled: Boolean = false,
-    val bypassLanEnabled: Boolean = true,
+    val sessionDownloadedBytes: Long = 0L,
+    val sessionUploadedBytes: Long = 0L,
+    val sessionDurationSeconds: Long = 0L,
+    val isBatteryOptimizationExempt: Boolean = true,
+    val showBatteryOptimizationDialog: Boolean = false,
+    val themeMode: String = ThemeManager.MODE_SYSTEM,
+    val isBypassIranEnabled: Boolean = AppConfig.DEFAULT_MCQUEEN_BYPASS_IRAN,
+    val bypassIranAvailability: BypassIranRoutingHelper.AvailabilityStatus? = null,
+    val appUpdateState: AppUpdateCheckResult = AppUpdateCheckResult.Idle,
 )
 
-class McQueenViewModel(application: Application) : BaseViewModel(application) {
-
+class McQueenViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = McQueenServerRepository()
-    private val coordinator = ConnectionSessionCoordinator()
+    private val appUpdateChecker = AppUpdateChecker()
+    private val sessionCoordinator = ConnectionSessionCoordinator()
 
     private val _uiState = MutableStateFlow(
         McQueenUiState(
-            manifestUrl = repository.getConfiguredUrl(),
-            manifestHasAuthToken = repository.hasConfiguredAuthToken(),
-            autoBootEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_IS_BOOTED, false),
-            bypassLanEnabled = SettingsManager.routingRulesetsBypassLan(),
+            manifestSourceUrl = repository.getConfiguredUrl(),
+            hasAuthToken = repository.hasConfiguredAuthToken(),
+            isBatteryOptimizationExempt = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(application),
+            themeMode = ThemeManager.themeMode,
+            isBypassIranEnabled = SettingsManager.isBypassIranEnabled(),
         )
     )
     val uiState: StateFlow<McQueenUiState> = _uiState.asStateFlow()
 
+    private val _snackbarEvents = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val snackbarEvents: SharedFlow<String> = _snackbarEvents.asSharedFlow()
+
+    private val _openExternalUrlEvents = MutableSharedFlow<String>(extraBufferCapacity = 2)
+    val openExternalUrlEvents: SharedFlow<String> = _openExternalUrlEvents.asSharedFlow()
+
     private var startVpnCallback: (() -> Unit)? = null
-    private var durationTickerJob: Job? = null
+    private var connectJob: Job? = null
     private var failoverJob: Job? = null
-    private var latencyJob: Job? = null
     private var connectionTimeoutJob: Job? = null
     private var verifyTunnelJob: Job? = null
+    private var durationTickerJob: Job? = null
+    private var latencyRefreshJob: Job? = null
+    private var manifestSyncJob: Job? = null
+    private var updateCheckJob: Job? = null
+    private var sessionStartTimeMs: Long = 0L
     private var pendingVerifyRequestId: String? = null
-    private var userRequestedDisconnect: Boolean = false
-    private var receiverRegistered = false
+    private var isReceiverRegistered = false
+    private val isServiceRunning = AtomicBoolean(false)
 
-    private val broadcastReceiver = object : BroadcastReceiver() {
+    private val mMsgReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
-            val action = intent?.action ?: return
-            if (action != AppConfig.BROADCAST_ACTION_ACTIVITY) return
+            when (intent?.getIntExtra("key", 0)) {
+                AppConfig.MSG_STATE_RUNNING -> {
+                    isServiceRunning.set(true)
+                    onCoreServiceStarted(isAlreadyRunning = true)
+                }
 
-            when (intent.getIntExtra("key", 0)) {
-                AppConfig.MSG_STATE_RUNNING -> handleServiceRunning()
-                AppConfig.MSG_STATE_NOT_RUNNING -> handleServiceStopped(preserveFailure = true)
-                AppConfig.MSG_STATE_START_SUCCESS -> handleStartSuccess()
-                AppConfig.MSG_STATE_CONNECTING -> handleConnecting(intent.getStringExtra("content"))
-                AppConfig.MSG_STATE_START_FAILURE -> handleStartFailure(intent.getStringExtra("content"))
+                AppConfig.MSG_STATE_CONNECTING -> {
+                    isServiceRunning.set(true)
+                    val detail = intent.getStringExtra("content").orEmpty()
+                    if (!sessionCoordinator.userRequestedDisconnect) {
+                        _uiState.update {
+                            it.copy(
+                                connectionState = if (sessionCoordinator.isSwitchingCountry) {
+                                    VpnConnectionState.RECONNECTING
+                                } else {
+                                    VpnConnectionState.CONNECTING
+                                },
+                                statusDetail = detail.ifBlank { it.statusDetail }
+                            )
+                        }
+                    }
+                }
+
+                AppConfig.MSG_STATE_NOT_RUNNING -> {
+                    isServiceRunning.set(false)
+                    val nextState = sessionCoordinator.onServiceStopped(
+                        preserveFailure = _uiState.value.connectionState == VpnConnectionState.FAILED
+                    )
+                    if (nextState != VpnConnectionState.RECONNECTING) {
+                        stopDurationTicker()
+                        cancelConnectionGuards()
+                        _uiState.update { state ->
+                            state.copy(
+                                connectionState = nextState,
+                                statusDetail = if (nextState == VpnConnectionState.FAILED) state.statusDetail else "",
+                                downloadBps = 0L,
+                                uploadBps = 0L,
+                                sessionDownloadedBytes = 0L,
+                                sessionUploadedBytes = 0L,
+                                sessionDurationSeconds = 0L,
+                            )
+                        }
+                    }
+                }
+
+                AppConfig.MSG_STATE_START_SUCCESS -> {
+                    isServiceRunning.set(true)
+                    onCoreServiceStarted(isAlreadyRunning = false)
+                }
+
+                AppConfig.MSG_STATE_START_FAILURE -> {
+                    isServiceRunning.set(false)
+                    val reason = intent.getStringExtra("content").orEmpty()
+                    handleConnectionCandidateFailure(reason)
+                }
+
                 AppConfig.MSG_STATE_STOP_SUCCESS -> {
-                    val shouldPreserveFailure = !userRequestedDisconnect
-                    userRequestedDisconnect = false
-                    handleServiceStopped(preserveFailure = shouldPreserveFailure)
+                    isServiceRunning.set(false)
+                    val nextState = sessionCoordinator.onServiceStopped(
+                        preserveFailure = _uiState.value.connectionState == VpnConnectionState.FAILED
+                    )
+                    if (nextState != VpnConnectionState.RECONNECTING) {
+                        stopDurationTicker()
+                        cancelConnectionGuards()
+                        _uiState.update { state ->
+                            state.copy(
+                                connectionState = nextState,
+                                statusDetail = if (nextState == VpnConnectionState.FAILED) state.statusDetail else "",
+                                downloadBps = 0L,
+                                uploadBps = 0L,
+                                sessionDownloadedBytes = 0L,
+                                sessionUploadedBytes = 0L,
+                                sessionDurationSeconds = 0L,
+                            )
+                        }
+                    }
                 }
+
                 AppConfig.MSG_MEASURE_DELAY_RESULT -> {
-                    val reqId = intent.getStringExtra(MessageHelper.EXTRA_REQUEST_ID)
-                    val result = intent.serializable<ConnectionTestResult>("content")
-                    handleMeasureDelayResult(reqId, result)
+                    val reqId = intent.getStringExtra(MessageHelper.EXTRA_REQUEST_ID).orEmpty()
+                    val content = intent.getStringExtra("content").orEmpty()
+                    val delayMs = if (intent.hasExtra(MessageHelper.EXTRA_DELAY_MS)) {
+                        intent.getLongExtra(MessageHelper.EXTRA_DELAY_MS, -1L)
+                    } else {
+                        null
+                    }
+                    handleTunnelVerificationMessage(reqId, content, delayMs)
                 }
-                AppConfig.MSG_MEASURE_DELAY_CANCEL -> {
-                    val reqId = intent.getStringExtra(MessageHelper.EXTRA_REQUEST_ID)
-                    handleMeasureDelayCancelled(reqId)
-                }
+
                 AppConfig.MSG_TRAFFIC_STATS -> {
-                    val snapshot = intent.serializable<TrafficStatsSnapshot>("content") ?: return
+                    val snapshot = intent.serializable<TrafficStatsSnapshot>("content")
                     handleTrafficStats(snapshot)
+                }
+
+                AppConfig.MSG_SERVERS_CHANGED -> {
+                    reloadCachedCountries()
                 }
             }
         }
     }
 
     init {
+        registerServiceReceiver()
+        observeSettingsReload()
+        evaluateInitialBatteryOptimization()
+        initializeGeoAssetsAndRefreshBypassStatus()
+        McQueenManifestUpdater.sync(application, forceReschedule = false)
+        loadInitialLocationsAndSync()
+    }
+
+    fun bindStartVpnCallback(callback: () -> Unit) {
+        startVpnCallback = callback
+    }
+
+    override fun onCleared() {
+        unregisterServiceReceiver()
+        stopDurationTicker()
+        cancelConnectionGuards()
+        super.onCleared()
+    }
+
+    fun onHostResumed() {
+        ThemeManager.refresh()
+        refreshBatteryOptimizationStatus()
+        refreshServiceStatus()
+        refreshBypassIranStatus()
+    }
+
+    fun evaluateInitialBatteryOptimization() {
+        val app = getApplication<Application>()
+        val isExempt = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(app)
+        _uiState.update {
+            it.copy(
+                isBatteryOptimizationExempt = isExempt,
+                showBatteryOptimizationDialog = false,
+            )
+        }
+    }
+
+    fun refreshBatteryOptimizationStatus() {
+        val app = getApplication<Application>()
+        val isExempt = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(app)
+        _uiState.update {
+            it.copy(
+                isBatteryOptimizationExempt = isExempt,
+                showBatteryOptimizationDialog = if (isExempt) false else it.showBatteryOptimizationDialog,
+            )
+        }
+    }
+
+    fun dismissBatteryOptimizationDialog() {
+        BatteryOptimizationHelper.markInitialPromptShown()
+        _uiState.update { it.copy(showBatteryOptimizationDialog = false) }
+    }
+
+    fun onConfirmBatteryOptimizationDialog() {
+        BatteryOptimizationHelper.markInitialPromptShown()
+        _uiState.update { it.copy(showBatteryOptimizationDialog = false) }
+    }
+
+    fun setThemeMode(mode: String) {
+        ThemeManager.setThemeMode(mode)
+        _uiState.update { it.copy(themeMode = ThemeManager.themeMode) }
+    }
+
+    fun setBypassIranEnabled(enabled: Boolean) {
+        val app = getApplication<Application>()
+        val previous = SettingsManager.isBypassIranEnabled()
+        SettingsManager.setBypassIranEnabled(enabled)
+        _uiState.update { it.copy(isBypassIranEnabled = enabled) }
+        refreshBypassIranStatus()
+
+        if (previous == enabled) return
+
+        val state = _uiState.value.connectionState
+        val isActiveSession = state == VpnConnectionState.CONNECTED ||
+            state == VpnConnectionState.PREPARING ||
+            state == VpnConnectionState.CONNECTING ||
+            state == VpnConnectionState.RECONNECTING
+        val selected = _uiState.value.selectedCountry
+        if (isActiveSession && selected != null) {
+            _snackbarEvents.tryEmit(app.getString(R.string.mcqueen_bypass_iran_reconnecting))
+            switchCountryAndReconnect(selected)
+        } else {
+            val msgRes = if (enabled) {
+                R.string.mcqueen_bypass_iran_enabled_next
+            } else {
+                R.string.mcqueen_bypass_iran_disabled_next
+            }
+            _snackbarEvents.tryEmit(app.getString(msgRes))
+        }
+    }
+
+    fun refreshBypassIranStatus() {
         viewModelScope.launch {
-            val cached = repository.loadCachedManifest(app)
-            if (cached != null) {
-                applyCountries(cached.countries, cached.updatedAt)
-                refreshCountryLatencies()
+            val app = getApplication<Application>()
+            val countryCode = _uiState.value.selectedCountry?.countryCode
+            val status = withContext(Dispatchers.IO) {
+                val selectedGuid = sessionCoordinator.currentGuid()
+                    ?: MmkvManager.getSelectServer()
+                    ?: countryCode?.let { code ->
+                        runCatching { repository.selectCandidatesForCountry(app, code).firstOrNull()?.guid }.getOrNull()
+                    }
+                BypassIranRoutingHelper.checkCompatibility(app, selectedGuid)
             }
-            syncCountries(showToast = false)
-        }
-    }
-
-    fun startListenBroadcast() {
-        if (!receiverRegistered) {
-            val filter = IntentFilter(AppConfig.BROADCAST_ACTION_ACTIVITY)
-            ContextCompat.registerReceiver(app, broadcastReceiver, filter, Utils.receiverFlags())
-            receiverRegistered = true
-        }
-        MessageHelper.sendMsg2ServiceForResult(app, AppConfig.MSG_REGISTER_CLIENT, "") { handled ->
-            if (!handled && coordinator.currentState() == VpnConnectionState.CONNECTED) {
-                handleServiceStopped(preserveFailure = true)
+            _uiState.update {
+                it.copy(
+                    isBypassIranEnabled = SettingsManager.isBypassIranEnabled(),
+                    bypassIranAvailability = status,
+                )
             }
         }
     }
 
-    fun stopListenBroadcast() {
-        if (receiverRegistered) {
+    private fun initializeGeoAssetsAndRefreshBypassStatus() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val status = withContext(Dispatchers.IO) {
+                SettingsManager.initAssets(app, app.assets)
+                BypassIranRoutingHelper.checkCompatibility(app, MmkvManager.getSelectServer())
+            }
+            _uiState.update {
+                it.copy(
+                    isBypassIranEnabled = SettingsManager.isBypassIranEnabled(),
+                    bypassIranAvailability = status,
+                )
+            }
+        }
+    }
+
+    fun checkForAppUpdate() {
+        if (updateCheckJob?.isActive == true) return
+        val app = getApplication<Application>()
+        _uiState.update { it.copy(appUpdateState = AppUpdateCheckResult.Checking) }
+
+        updateCheckJob = viewModelScope.launch {
+            val result = appUpdateChecker.checkLatestRelease()
+            _uiState.update { it.copy(appUpdateState = result) }
+
+            when (result) {
+                is AppUpdateCheckResult.UpdateAvailable -> Unit
+                is AppUpdateCheckResult.UpToDate -> {
+                    _snackbarEvents.tryEmit(
+                        app.getString(R.string.mcqueen_update_up_to_date, result.installedVersion)
+                    )
+                }
+
+                AppUpdateCheckResult.NoInternet -> {
+                    _snackbarEvents.tryEmit(app.getString(R.string.mcqueen_update_no_internet))
+                }
+
+                is AppUpdateCheckResult.RateLimited -> {
+                    _snackbarEvents.tryEmit(app.getString(R.string.mcqueen_update_rate_limited))
+                }
+
+                is AppUpdateCheckResult.InvalidResponse -> {
+                    _snackbarEvents.tryEmit(app.getString(R.string.mcqueen_update_invalid_response))
+                }
+
+                is AppUpdateCheckResult.MissingApkAsset -> {
+                    _snackbarEvents.tryEmit(
+                        app.getString(R.string.mcqueen_update_missing_apk, result.latestVersion)
+                    )
+                }
+
+                AppUpdateCheckResult.Idle,
+                AppUpdateCheckResult.Checking -> Unit
+            }
+        }
+    }
+
+    fun dismissUpdateDialog() {
+        _uiState.update { it.copy(appUpdateState = AppUpdateCheckResult.Idle) }
+    }
+
+    fun openVerifiedUpdateUrl() {
+        val current = _uiState.value.appUpdateState as? AppUpdateCheckResult.UpdateAvailable ?: return
+        if (!GitHubReleaseParser.isOfficialGitHubAssetUrl(current.apkDownloadUrl)) {
+            _snackbarEvents.tryEmit(
+                getApplication<Application>().getString(R.string.mcqueen_update_invalid_response)
+            )
+            return
+        }
+        _openExternalUrlEvents.tryEmit(current.apkDownloadUrl)
+        _uiState.update { it.copy(appUpdateState = AppUpdateCheckResult.Idle) }
+    }
+
+    fun refreshServiceStatus() {
+        MessageHelper.sendMsg2Service(getApplication(), AppConfig.MSG_REGISTER_CLIENT, "")
+    }
+
+    private fun observeSettingsReload() {
+        _uiState.update {
+            it.copy(
+                manifestSourceUrl = repository.getConfiguredUrl(),
+                hasAuthToken = repository.hasConfiguredAuthToken(),
+                themeMode = ThemeManager.themeMode,
+            )
+        }
+    }
+
+    private fun loadInitialLocationsAndSync() {
+        viewModelScope.launch {
+            reloadCachedCountriesInternal()
+            syncManifestFromGitHub(silentSuccess = true, forceRefresh = false)
+        }
+    }
+
+    private fun reloadCachedCountries() {
+        viewModelScope.launch {
+            reloadCachedCountriesInternal()
+        }
+    }
+
+    private suspend fun reloadCachedCountriesInternal(): Boolean {
+        val app = getApplication<Application>()
+        val cached = repository.loadCachedManifest(app) ?: return false
+        if (cached.countries.isEmpty()) return false
+        applyCountriesList(cached.countries, cached.updatedAt.orEmpty())
+        return true
+    }
+
+    private fun applyCountriesList(countries: List<CountryUiModel>, updatedAt: String) {
+        val savedCode = MmkvManager.decodeSettingsString(AppConfig.PREF_MCQUEEN_SELECTED_COUNTRY_CODE, null)
+        val savedName = MmkvManager.decodeSettingsString(AppConfig.PREF_MCQUEEN_SELECTED_COUNTRY, null)
+        val resolvedSelection = McQueenUiHelper.resolveSavedCountry(
+            countries = countries,
+            currentSelectedCode = _uiState.value.selectedCountry?.countryCode,
+            savedCode = savedCode,
+            savedName = savedName,
+        )
+
+        if (resolvedSelection != null) {
+            persistSelectedCountry(resolvedSelection)
+        } else if (!savedCode.isNullOrBlank() || !savedName.isNullOrBlank()) {
+            clearPersistedCountry()
+        }
+
+        _uiState.update {
+            it.copy(
+                countries = countries,
+                selectedCountry = resolvedSelection,
+                manifestErrorMessage = null,
+                lastSyncUpdatedAt = updatedAt.ifBlank { it.lastSyncUpdatedAt },
+                manifestSourceUrl = repository.getConfiguredUrl(),
+                hasAuthToken = repository.hasConfiguredAuthToken(),
+            )
+        }
+        if (resolvedSelection != null) {
+            refreshBypassIranStatus()
+        }
+    }
+
+    fun selectCountry(country: CountryUiModel) {
+        val currentState = _uiState.value.connectionState
+        val previousCountryCode = _uiState.value.selectedCountry?.countryCode
+
+        persistSelectedCountry(country)
+
+        val shouldSwitch = sessionCoordinator.shouldTriggerCountrySwitch(
+            currentState = currentState,
+            currentCountryCode = previousCountryCode,
+            newCountryCode = country.countryCode,
+        )
+
+        if (!shouldSwitch) {
+            _uiState.update {
+                it.copy(
+                    selectedCountry = country,
+                    connectionState = if (it.connectionState == VpnConnectionState.FAILED) {
+                        VpnConnectionState.DISCONNECTED
+                    } else {
+                        it.connectionState
+                    },
+                    statusDetail = if (it.connectionState == VpnConnectionState.FAILED) "" else it.statusDetail,
+                )
+            }
+            return
+        }
+
+        switchCountryAndReconnect(country)
+        refreshBypassIranStatus()
+    }
+
+    private fun persistSelectedCountry(country: CountryUiModel) {
+        MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_SELECTED_COUNTRY_CODE, country.countryCode)
+        MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_SELECTED_COUNTRY, country.countryName)
+    }
+
+    private fun clearPersistedCountry() {
+        MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_SELECTED_COUNTRY_CODE, "")
+        MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_SELECTED_COUNTRY, "")
+    }
+
+    fun syncManifestFromGitHub(silentSuccess: Boolean = false, forceRefresh: Boolean = !silentSuccess) {
+        val existingJob = manifestSyncJob
+        if (existingJob?.isActive == true) {
+            if (!forceRefresh) return
+            existingJob.cancel()
+        }
+
+        manifestSyncJob = viewModelScope.launch {
+            val app = getApplication<Application>()
+            _uiState.update { it.copy(isSyncingManifest = true, manifestErrorMessage = null) }
             try {
-                app.unregisterReceiver(broadcastReceiver)
-            } catch (e: Exception) {
-                LogUtil.e(AppConfig.TAG, "McQueenViewModel: failed to unregister receiver", e)
-            }
-            receiverRegistered = false
-        }
-    }
-
-    fun syncCountries(showToast: Boolean = true) {
-        if (_uiState.value.isSyncing) return
-        viewModelScope.launch {
-            _uiState.update { it.copy(isSyncing = true, syncError = null) }
-            when (val outcome = repository.syncFromGitHub(app)) {
-                is ManifestSyncOutcome.Success -> {
-                    applyCountries(outcome.manifest.countries, outcome.manifest.updatedAt)
-                    _uiState.update { it.copy(isSyncing = false, syncError = null) }
-                    if (showToast) {
-                        toastSuccess(getString(R.string.mcqueen_sync_success, outcome.manifest.countries.size))
+                when (val outcome = repository.syncFromGitHub(app)) {
+                    is ManifestSyncOutcome.Success -> {
+                        val countries = outcome.manifest.countries
+                        applyCountriesList(countries, outcome.manifest.updatedAt.orEmpty())
+                        if (!silentSuccess) {
+                            _snackbarEvents.tryEmit(
+                                app.getString(R.string.mcqueen_sync_success, countries.size)
+                            )
+                        }
+                        refreshCountryLatenciesInBackground(countries)
                     }
-                    refreshCountryLatencies()
-                }
 
-                is ManifestSyncOutcome.Failure -> {
-                    _uiState.update {
-                        it.copy(
-                            isSyncing = false,
-                            syncError = outcome.reason,
-                        )
-                    }
-                    if (showToast) {
-                        toastError(getString(R.string.mcqueen_sync_error, outcome.reason))
+                    is ManifestSyncOutcome.Failure -> {
+                        if (_uiState.value.countries.isEmpty()) {
+                            reloadCachedCountriesInternal()
+                        }
+                        if (_uiState.value.countries.isEmpty()) {
+                            _uiState.update { it.copy(manifestErrorMessage = outcome.reason) }
+                        }
+                        if (!silentSuccess || _uiState.value.countries.isEmpty()) {
+                            _snackbarEvents.tryEmit(
+                                app.getString(R.string.mcqueen_sync_error, outcome.reason)
+                            )
+                        }
                     }
                 }
+            } finally {
+                _uiState.update { it.copy(isSyncingManifest = false) }
             }
         }
     }
 
-    fun refreshCountryLatencies() {
-        val currentCountries = _uiState.value.countries
-        if (currentCountries.isEmpty()) return
-        latencyJob?.cancel()
-        latencyJob = viewModelScope.launch {
-            val measured = repository.measureCountryLatencies(app, currentCountries)
-            _uiState.update { state ->
-                val selectedCode = state.selectedCountry?.countryCode
-                val updatedSelected = selectedCode?.let { code ->
-                    measured.firstOrNull { it.countryCode == code }
-                } ?: state.selectedCountry
-                state.copy(
-                    countries = measured,
+    private fun refreshCountryLatenciesInBackground(countries: List<CountryUiModel>) {
+        latencyRefreshJob?.cancel()
+        latencyRefreshJob = viewModelScope.launch {
+            val app = getApplication<Application>()
+            val measured = runCatching {
+                repository.measureCountryLatencies(app, countries)
+            }.getOrNull() ?: return@launch
+
+            val measuredByCode = measured.associateBy { it.countryCode }
+            val currentList = _uiState.value.countries.ifEmpty { measured }
+            val mergedCountries = currentList.map { existing ->
+                val updated = measuredByCode[existing.countryCode]
+                if (updated != null) {
+                    existing.copy(
+                        bestLatencyMs = updated.bestLatencyMs,
+                        availability = updated.availability,
+                    )
+                } else {
+                    existing
+                }
+            }
+
+            val selectedCode = _uiState.value.selectedCountry?.countryCode
+            val updatedSelected = mergedCountries.firstOrNull { it.countryCode == selectedCode }
+                ?: _uiState.value.selectedCountry
+
+            _uiState.update {
+                it.copy(
+                    countries = mergedCountries,
                     selectedCountry = updatedSelected,
                 )
             }
         }
     }
 
-    fun selectCountry(country: CountryUiModel) {
-        persistSelectedCountry(country)
-        _uiState.update { state ->
-            val resetFailed = state.connectionState == VpnConnectionState.FAILED
-            val nextConnectionState = if (resetFailed) coordinator.onUserDisconnect() else state.connectionState
-            state.copy(
-                selectedCountry = country,
-                connectionState = nextConnectionState,
-                statusDetail = if (resetFailed) null else state.statusDetail,
+    fun updateManifestSourceAndSync(url: String, authToken: String? = null, clearToken: Boolean = false) {
+        val saved = repository.saveCustomManifestConfig(
+            url = url,
+            authTokenInput = authToken,
+            clearAuthToken = clearToken,
+        )
+        if (!saved) {
+            _snackbarEvents.tryEmit(getApplication<Application>().getString(R.string.mcqueen_settings_manifest_invalid))
+            return
+        }
+        _uiState.update {
+            it.copy(
+                manifestSourceUrl = repository.getConfiguredUrl(),
+                hasAuthToken = repository.hasConfiguredAuthToken(),
             )
         }
+        McQueenManifestUpdater.sync(getApplication(), forceReschedule = true)
+        syncManifestFromGitHub(silentSuccess = false, forceRefresh = true)
     }
 
-    fun onConnectActionClicked(
-        needsVpnPermission: () -> Boolean,
-        requestVpnPermission: () -> Unit,
-        startVpnService: () -> Unit,
-    ) {
-        startVpnCallback = startVpnService
+    fun resetManifestSourceAndSync() {
+        repository.resetCustomUrl()
+        _uiState.update {
+            it.copy(
+                manifestSourceUrl = repository.getConfiguredUrl(),
+                hasAuthToken = repository.hasConfiguredAuthToken(),
+            )
+        }
+        McQueenManifestUpdater.sync(getApplication(), forceReschedule = true)
+        syncManifestFromGitHub(silentSuccess = false, forceRefresh = true)
+    }
+
+    fun toggleConnection() {
         when (_uiState.value.connectionState) {
             VpnConnectionState.CONNECTED,
             VpnConnectionState.PREPARING,
             VpnConnectionState.CONNECTING,
-            VpnConnectionState.RECONNECTING -> {
-                disconnect()
-            }
+            VpnConnectionState.RECONNECTING -> disconnectVpn()
 
             VpnConnectionState.DISCONNECTED,
-            VpnConnectionState.FAILED -> {
-                val targetCountry = ensureSelectedCountry() ?: run {
-                    toast(R.string.mcqueen_select_country_first)
-                    return
-                }
-                if (needsVpnPermission()) {
-                    requestVpnPermission()
-                } else {
-                    connectCountry(targetCountry, startVpnService)
-                }
-            }
+            VpnConnectionState.FAILED -> connectSelectedCountry()
         }
     }
 
-    fun onVpnPermissionGranted(startVpnService: () -> Unit) {
-        startVpnCallback = startVpnService
-        val targetCountry = ensureSelectedCountry() ?: return
-        connectCountry(targetCountry, startVpnService)
-    }
-
-    fun onVpnPermissionDenied() {
-        cancelAttemptGuards()
-        coordinator.onUserDisconnect()
-        _uiState.update {
-            it.copy(
-                connectionState = VpnConnectionState.DISCONNECTED,
-                statusDetail = getString(R.string.mcqueen_vpn_permission_denied),
-            )
-        }
-        toastError(R.string.mcqueen_vpn_permission_denied)
-    }
-
-    fun disconnect() {
-        userRequestedDisconnect = true
-        cancelAttemptGuards()
+    private fun switchCountryAndReconnect(country: CountryUiModel) {
+        val operationId = sessionCoordinator.beginCountrySwitch(country.countryCode)
+        connectJob?.cancel()
+        failoverJob?.cancel()
+        cancelConnectionGuards()
         stopDurationTicker()
-        coordinator.onUserDisconnect()
-        LauncherManager.stopService(app)
+
+        val switchingStatus = getApplication<Application>().getString(
+            R.string.mcqueen_switching_country,
+            country.countryName
+        )
+
         _uiState.update {
             it.copy(
-                connectionState = VpnConnectionState.DISCONNECTED,
-                statusDetail = null,
+                selectedCountry = country,
+                connectionState = VpnConnectionState.RECONNECTING,
+                statusDetail = switchingStatus,
                 downloadBps = 0L,
                 uploadBps = 0L,
-                sessionStartMs = 0L,
-                sessionDurationText = "00:00:00",
+                sessionDownloadedBytes = 0L,
+                sessionUploadedBytes = 0L,
+                sessionDurationSeconds = 0L,
+            )
+        }
+
+        connectJob = viewModelScope.launch {
+            awaitActiveServiceStopped(operationId)
+            if (!sessionCoordinator.isCurrentOperation(operationId)) return@launch
+
+            startCountryCandidates(
+                country = country,
+                operationId = operationId,
+                isCountrySwitch = true,
             )
         }
     }
 
-    fun setThemeMode(mode: String) {
-        ThemeManager.setThemeMode(mode)
+    private suspend fun awaitActiveServiceStopped(operationId: Long) {
+        val wasRunning = isServiceRunning.get() || CoreServiceManager.isServiceRunning()
+        if (wasRunning) {
+            MessageHelper.sendMsg2Service(getApplication(), AppConfig.MSG_STATE_STOP, "")
+        }
+
+        val deadlineElapsedMs = SystemClock.elapsedRealtime() + SERVICE_STOP_AWAIT_TIMEOUT_MS
+        while (sessionCoordinator.isCurrentOperation(operationId) &&
+            (isServiceRunning.get() || CoreServiceManager.isServiceRunning()) &&
+            SystemClock.elapsedRealtime() < deadlineElapsedMs
+        ) {
+            delay(SERVICE_STOP_POLL_INTERVAL_MS)
+        }
+        isServiceRunning.set(false)
     }
 
-    fun setAutoBootEnabled(enabled: Boolean) {
-        MmkvManager.encodeSettings(AppConfig.PREF_IS_BOOTED, enabled)
-        _uiState.update { it.copy(autoBootEnabled = enabled) }
-    }
-
-    fun setBypassLanEnabled(enabled: Boolean) {
-        viewModelScope.launch {
-            MmkvManager.encodeSettings(AppConfig.PREF_VPN_BYPASS_LAN, if (enabled) "1" else "2")
-            _uiState.update { it.copy(bypassLanEnabled = SettingsManager.routingRulesetsBypassLan()) }
-            if (_uiState.value.connectionState == VpnConnectionState.CONNECTED) {
-                LauncherManager.restartService(app)
+    private fun connectSelectedCountry() {
+        val country = _uiState.value.selectedCountry
+            ?: _uiState.value.countries.firstOrNull()?.also { firstCountry ->
+                persistSelectedCountry(firstCountry)
+                _uiState.update { it.copy(selectedCountry = firstCountry) }
             }
+        if (country == null) {
+            _snackbarEvents.tryEmit(getApplication<Application>().getString(R.string.mcqueen_select_country_first))
+            syncManifestFromGitHub(silentSuccess = true, forceRefresh = false)
+            return
+        }
+
+        connectJob?.cancel()
+        failoverJob?.cancel()
+        cancelConnectionGuards()
+
+        sessionCoordinator.startPreparing(country.countryCode)
+        val operationId = sessionCoordinator.activeOperationId
+        connectJob = viewModelScope.launch {
+            startCountryCandidates(
+                country = country,
+                operationId = operationId,
+                isCountrySwitch = false,
+            )
         }
     }
 
-    fun saveManifestUrlAndSync(
-        rawUrl: String,
-        rawAuthToken: String = "",
-        clearAuthToken: Boolean = false,
-    ): Boolean {
-        if (!repository.saveCustomManifestConfig(rawUrl, rawAuthToken, clearAuthToken)) {
-            toastError(R.string.mcqueen_settings_manifest_invalid)
-            return false
-        }
-        _uiState.update {
-            it.copy(
-                manifestUrl = repository.getConfiguredUrl(),
-                manifestHasAuthToken = repository.hasConfiguredAuthToken(),
-            )
-        }
-        McQueenManifestUpdater.sync(app, forceReschedule = true)
-        syncCountries(showToast = true)
-        return true
-    }
+    private suspend fun startCountryCandidates(
+        country: CountryUiModel,
+        operationId: Long,
+        isCountrySwitch: Boolean,
+    ) {
+        val app = getApplication<Application>()
 
-    fun resetManifestUrlAndSync() {
-        repository.resetCustomUrl()
-        _uiState.update {
-            it.copy(
-                manifestUrl = repository.getConfiguredUrl(),
-                manifestHasAuthToken = false,
-            )
-        }
-        McQueenManifestUpdater.sync(app, forceReschedule = true)
-        syncCountries(showToast = true)
-    }
+        val needsProvisioning = repository.hasPendingIdentityProvisioning(app, country.countryCode)
+        if (!sessionCoordinator.isCurrentOperation(operationId)) return
 
-    private fun connectCountry(country: CountryUiModel, startVpnService: () -> Unit) {
-        userRequestedDisconnect = false
-        cancelAttemptGuards()
-        persistSelectedCountry(country)
-
-        _uiState.update {
-            it.copy(
-                connectionState = VpnConnectionState.CONNECTING,
-                statusDetail = getString(R.string.mcqueen_testing_country, country.countryName),
-                downloadBps = 0L,
-                uploadBps = 0L,
-            )
-        }
-
-        failoverJob = viewModelScope.launch {
-            if (repository.hasPendingIdentityProvisioning(app, country.countryCode)) {
-                coordinator.startPreparing()
-                _uiState.update {
-                    it.copy(
-                        connectionState = VpnConnectionState.PREPARING,
-                        statusDetail = getString(R.string.mcqueen_preparing_secure_connection),
-                        downloadBps = 0L,
-                        uploadBps = 0L,
-                    )
-                }
-            }
-
-            when (val identityStatus = repository.ensureIdentitiesForCountry(app, country.countryCode)) {
-                is CountryIdentityStatus.Failed -> {
-                    val failureMessage = getString(identityStatus.kind.userMessageRes)
-                    coordinator.onStartFailure(failureMessage)
-                    _uiState.update {
-                        it.copy(
-                            connectionState = VpnConnectionState.FAILED,
-                            statusDetail = failureMessage,
-                            downloadBps = 0L,
-                            uploadBps = 0L,
-                        )
-                    }
-                    return@launch
-                }
-
-                is CountryIdentityStatus.Ready -> Unit
-            }
-
-            if (userRequestedDisconnect) return@launch
-
+        if (needsProvisioning) {
             _uiState.update {
                 it.copy(
-                    connectionState = VpnConnectionState.CONNECTING,
-                    statusDetail = getString(R.string.mcqueen_testing_country, country.countryName),
+                    connectionState = if (isCountrySwitch) VpnConnectionState.RECONNECTING else VpnConnectionState.PREPARING,
+                    statusDetail = if (isCountrySwitch) {
+                        app.getString(R.string.mcqueen_switching_country, country.countryName)
+                    } else {
+                        app.getString(R.string.mcqueen_preparing_secure_connection)
+                    },
                     downloadBps = 0L,
                     uploadBps = 0L,
                 )
             }
+        }
 
-            val ranked = repository.selectCandidatesForCountry(app, country.countryCode)
-            val firstGuid = coordinator.startAttempt(ranked.map { it.guid })
-            if (firstGuid == null) {
+        when (val identityStatus = repository.ensureIdentitiesForCountry(app, country.countryCode)) {
+            is CountryIdentityStatus.Ready -> {
+                LogUtil.i(AppConfig.TAG, "Identity status ready for ${country.countryCode}")
+            }
+
+            is CountryIdentityStatus.Failed -> {
+                if (!sessionCoordinator.isCurrentOperation(operationId)) return
+                val errorText = app.getString(identityStatus.kind.userMessageRes)
+                sessionCoordinator.onStartFailure(errorText)
                 _uiState.update {
                     it.copy(
                         connectionState = VpnConnectionState.FAILED,
-                        statusDetail = getString(R.string.mcqueen_all_candidates_failed, country.countryName),
+                        statusDetail = errorText,
+                        downloadBps = 0L,
+                        uploadBps = 0L,
                     )
                 }
-                return@launch
+                _snackbarEvents.tryEmit(errorText)
+                return
             }
-            MmkvManager.setSelectServer(firstGuid)
-            startAttemptTimeout(firstGuid)
-            startVpnService()
         }
-    }
 
-    private fun startAttemptTimeout(guid: String) {
-        connectionTimeoutJob?.cancel()
-        val isAether = MmkvManager.decodeServerConfig(guid)?.configType == EConfigType.AETHER
-        val timeoutMs = if (isAether) {
-            McQueenServerConfig.AETHER_CONNECT_ATTEMPT_TIMEOUT_MS
+        if (!sessionCoordinator.isCurrentOperation(operationId)) return
+
+        _uiState.update {
+            it.copy(
+                connectionState = if (isCountrySwitch) VpnConnectionState.RECONNECTING else VpnConnectionState.CONNECTING,
+                statusDetail = if (isCountrySwitch) {
+                    app.getString(R.string.mcqueen_switching_country, country.countryName)
+                } else {
+                    app.getString(R.string.mcqueen_testing_country, country.countryName)
+                },
+                downloadBps = 0L,
+                uploadBps = 0L,
+            )
+        }
+
+        val rankedCandidates = repository.selectCandidatesForCountry(app, country.countryCode)
+        if (!sessionCoordinator.isCurrentOperation(operationId)) return
+
+        val orderedGuids = rankedCandidates.map { it.guid }
+        val firstGuid = if (isCountrySwitch) {
+            sessionCoordinator.attachSwitchCandidates(operationId, orderedGuids)
         } else {
-            McQueenServerConfig.CONNECT_ATTEMPT_TIMEOUT_MS
+            sessionCoordinator.startAttempt(orderedGuids, country.countryCode)
         }
-        connectionTimeoutJob = viewModelScope.launch {
-            delay(timeoutMs)
-            val currentState = coordinator.currentState()
-            if ((currentState == VpnConnectionState.CONNECTING || currentState == VpnConnectionState.RECONNECTING) &&
-                coordinator.currentGuid() == guid
-            ) {
-                LogUtil.w(AppConfig.TAG, "McQueenViewModel: attempt timeout after ${timeoutMs}ms for guid=$guid")
-                LauncherManager.stopService(app)
-                handleStartFailure(getString(R.string.mcqueen_connection_timeout))
+
+        if (firstGuid == null) {
+            val failedText = app.getString(R.string.mcqueen_all_candidates_failed, country.countryName)
+            _uiState.update {
+                it.copy(
+                    connectionState = VpnConnectionState.FAILED,
+                    statusDetail = failedText,
+                )
             }
+            _snackbarEvents.tryEmit(failedText)
+            return
         }
+
+        MmkvManager.setSelectServer(firstGuid)
+        startConnectionTimeoutGuard(country.countryName, sessionCoordinator.activeOperationId)
+        startVpnCallback?.invoke() ?: LauncherManager.startService(app, firstGuid)
     }
 
-    private fun handleServiceRunning() {
-        connectionTimeoutJob?.cancel()
-        val nextState = coordinator.onServiceRunningQuery()
+    private fun onCoreServiceStarted(isAlreadyRunning: Boolean) {
+        if (sessionCoordinator.userRequestedDisconnect) return
+        val operationId = sessionCoordinator.activeOperationId
+
+        val activeGuid = MmkvManager.getSelectServer()
+        if (activeGuid != null && sessionCoordinator.currentGuid() == null && isAlreadyRunning) {
+            val country = _uiState.value.selectedCountry
+            sessionCoordinator.startAttempt(listOf(activeGuid), country?.countryCode)
+            sessionCoordinator.onStartSuccess()
+            startDurationTicker()
+            _uiState.update {
+                it.copy(
+                    connectionState = VpnConnectionState.CONNECTED,
+                    statusDetail = "",
+                )
+            }
+            return
+        }
+
+        if (isAlreadyRunning && _uiState.value.connectionState == VpnConnectionState.CONNECTED) {
+            return
+        }
+
         _uiState.update {
             it.copy(
-                connectionState = nextState,
-                statusDetail = if (nextState == VpnConnectionState.CONNECTED) null else it.statusDetail,
+                connectionState = if (sessionCoordinator.isSwitchingCountry) {
+                    VpnConnectionState.RECONNECTING
+                } else {
+                    VpnConnectionState.CONNECTING
+                },
+                statusDetail = getApplication<Application>().getString(R.string.mcqueen_verifying_tunnel),
             )
         }
-    }
 
-    private fun handleConnecting(detail: String?) {
-        val nextState = coordinator.onConnectingBroadcast()
-        _uiState.update {
-            it.copy(
-                connectionState = nextState,
-                statusDetail = detail?.takeIf { text -> text.isNotBlank() } ?: it.statusDetail,
-            )
-        }
-    }
-
-    private fun handleStartSuccess() {
-        failoverJob?.cancel()
-        connectionTimeoutJob?.cancel()
-        if (userRequestedDisconnect) return
-
-        // Verify end-to-end encrypted traffic over the newly started core before promoting UI to CONNECTED.
-        val requestId = UUID.randomUUID().toString()
+        verifyTunnelJob?.cancel()
+        val requestId = "verify_${UUID.randomUUID()}"
         pendingVerifyRequestId = requestId
-        _uiState.update {
-            it.copy(
-                statusDetail = getString(R.string.mcqueen_verifying_tunnel),
-            )
-        }
-
-        verifyTunnelJob?.cancel()
         verifyTunnelJob = viewModelScope.launch {
-            delay(McQueenServerConfig.TUNNEL_VERIFY_TIMEOUT_MS)
-            if (pendingVerifyRequestId == requestId) {
-                pendingVerifyRequestId = null
-                LogUtil.w(AppConfig.TAG, "McQueenViewModel: post-connect tunnel verification timed out")
-                LauncherManager.stopService(app)
-                handleStartFailure(getString(R.string.mcqueen_tunnel_check_failed))
-            }
-        }
-
-        MessageHelper.sendMsg2ServiceForResult(app, AppConfig.MSG_MEASURE_DELAY, requestId) { handled ->
-            if (!handled && pendingVerifyRequestId == requestId) {
-                pendingVerifyRequestId = null
-                verifyTunnelJob?.cancel()
-                handleStartFailure(getString(R.string.mcqueen_tunnel_check_failed))
-            }
+            delay(350L)
+            if (!sessionCoordinator.isCurrentOperation(operationId)) return@launch
+            MessageHelper.sendMsg2Service(getApplication(), AppConfig.MSG_MEASURE_DELAY, "", requestId)
         }
     }
 
-    private fun handleMeasureDelayResult(requestId: String?, result: ConnectionTestResult?) {
-        val activeRequestId = pendingVerifyRequestId ?: return
-        if (requestId != activeRequestId) return
+    private fun handleTunnelVerificationMessage(
+        requestId: String,
+        content: String,
+        delayMs: Long? = null,
+    ) {
+        if (sessionCoordinator.userRequestedDisconnect) return
+        val expectedId = pendingVerifyRequestId ?: return
+        if (requestId.isNotEmpty() && requestId != expectedId) return
+
+        val firstLine = content.lineSequence().firstOrNull().orEmpty()
+        val isSuccess = TunnelProbePolicy.isVerificationSuccess(delayMs, content)
 
         pendingVerifyRequestId = null
-        verifyTunnelJob?.cancel()
-
-        if (result != null && result.delayMillis >= 0L) {
-            promoteToConnected()
+        if (isSuccess) {
+            cancelConnectionGuards()
+            sessionCoordinator.onStartSuccess()
+            startDurationTicker()
+            _uiState.update {
+                it.copy(
+                    connectionState = VpnConnectionState.CONNECTED,
+                    statusDetail = "",
+                )
+            }
         } else {
-            val safeError = result?.errorMessage
-                ?.let(AetherIdentityProvisioner::sanitizeDiagnosticLine)
-                ?.takeIf { it.isNotBlank() }
-            val tunnelFailure = AetherIdentityProvisioner.classifyTunnelFailure(safeError)
-            val reason = getString(tunnelFailure.userMessageRes)
-            LogUtil.w(AppConfig.TAG, "McQueenViewModel: post-connect tunnel verification failed: kind=$tunnelFailure")
-            LauncherManager.stopService(app)
-            handleStartFailure(reason)
-        }
-    }
-
-    private fun handleMeasureDelayCancelled(requestId: String?) {
-        val activeRequestId = pendingVerifyRequestId ?: return
-        if (requestId != activeRequestId) return
-
-        pendingVerifyRequestId = null
-        verifyTunnelJob?.cancel()
-        if (!userRequestedDisconnect) {
-            LauncherManager.stopService(app)
-            handleStartFailure(getString(R.string.mcqueen_tunnel_check_failed))
-        }
-    }
-
-    private fun promoteToConnected() {
-        val nextState = coordinator.onStartSuccess()
-        val now = System.currentTimeMillis()
-        val effectiveStart = _uiState.value.sessionStartMs.takeIf { it > 0L } ?: now
-        startDurationTicker(effectiveStart)
-        _uiState.update {
-            it.copy(
-                connectionState = nextState,
-                statusDetail = null,
-                sessionStartMs = effectiveStart,
+            LogUtil.w(AppConfig.TAG, "Tunnel verification failed ($firstLine, delayMs=$delayMs); rotating candidate")
+            MessageHelper.sendMsg2Service(getApplication(), AppConfig.MSG_STATE_STOP, "")
+            handleConnectionCandidateFailure(
+                getApplication<Application>().getString(R.string.mcqueen_tunnel_check_failed)
             )
         }
     }
 
-    private fun handleStartFailure(reason: String?) {
-        if (userRequestedDisconnect) return
+    private fun handleTrafficStats(snapshot: TrafficStatsSnapshot?) {
+        if (_uiState.value.connectionState != VpnConnectionState.CONNECTED) return
+        val downBps = (snapshot?.downlinkBps ?: 0L).coerceAtLeast(0L)
+        val upBps = (snapshot?.uplinkBps ?: 0L).coerceAtLeast(0L)
+        val sessionDownBytes = (snapshot?.sessionDownlinkBytes ?: 0L).coerceAtLeast(0L)
+        val sessionUpBytes = (snapshot?.sessionUplinkBytes ?: 0L).coerceAtLeast(0L)
+        val startMs = snapshot?.sessionStartMs ?: 0L
+        if (startMs > 0L && sessionStartTimeMs != startMs) {
+            sessionStartTimeMs = startMs
+        }
+        _uiState.update {
+            it.copy(
+                downloadBps = downBps,
+                uploadBps = upBps,
+                sessionDownloadedBytes = sessionDownBytes,
+                sessionUploadedBytes = sessionUpBytes,
+            )
+        }
+    }
+
+    private fun startConnectionTimeoutGuard(countryName: String, expectedOperationId: Long) {
         connectionTimeoutJob?.cancel()
+        connectionTimeoutJob = viewModelScope.launch {
+            delay(CANDIDATE_CONNECTION_TIMEOUT_MS)
+            if (!sessionCoordinator.isCurrentOperation(expectedOperationId)) return@launch
+            val state = _uiState.value.connectionState
+            if (state == VpnConnectionState.PREPARING ||
+                state == VpnConnectionState.CONNECTING ||
+                state == VpnConnectionState.RECONNECTING
+            ) {
+                LogUtil.w(AppConfig.TAG, "Connection attempt timed out in $countryName; rotating candidate")
+                MessageHelper.sendMsg2Service(getApplication(), AppConfig.MSG_STATE_STOP, "")
+                handleConnectionCandidateFailure(
+                    getApplication<Application>().getString(R.string.mcqueen_connection_timeout)
+                )
+            }
+        }
+    }
+
+    private fun cancelConnectionGuards() {
+        connectionTimeoutJob?.cancel()
+        connectionTimeoutJob = null
         verifyTunnelJob?.cancel()
+        verifyTunnelJob = null
         pendingVerifyRequestId = null
+    }
+
+    private fun handleConnectionCandidateFailure(reason: String = "") {
+        if (sessionCoordinator.userRequestedDisconnect) return
+        cancelConnectionGuards()
         stopDurationTicker()
 
-        when (val decision = coordinator.onStartFailure(reason)) {
+        val app = getApplication<Application>()
+        val countryName = _uiState.value.selectedCountry?.countryName
+            ?: app.getString(R.string.app_name)
+
+        val decision = sessionCoordinator.onStartFailure(reason)
+        val operationId = sessionCoordinator.activeOperationId
+
+        when (decision) {
             is FailoverDecision.RetryNext -> {
-                val countryName = _uiState.value.selectedCountry?.countryName.orEmpty()
                 _uiState.update {
                     it.copy(
                         connectionState = VpnConnectionState.RECONNECTING,
-                        statusDetail = getString(R.string.mcqueen_failover_notice, countryName),
+                        statusDetail = app.getString(R.string.mcqueen_failover_notice, countryName),
                         downloadBps = 0L,
                         uploadBps = 0L,
-                        sessionStartMs = 0L,
-                        sessionDurationText = "00:00:00",
                     )
                 }
                 failoverJob?.cancel()
                 failoverJob = viewModelScope.launch {
-                    delay(450L)
+                    awaitActiveServiceStopped(operationId)
+                    if (!sessionCoordinator.isCurrentOperation(operationId)) return@launch
                     MmkvManager.setSelectServer(decision.guid)
-                    startAttemptTimeout(decision.guid)
-                    val callback = startVpnCallback
-                    if (callback != null) {
-                        callback()
-                    } else {
-                        LauncherManager.startService(app, decision.guid)
-                    }
+                    startConnectionTimeoutGuard(countryName, operationId)
+                    startVpnCallback?.invoke() ?: LauncherManager.startService(app, decision.guid)
                 }
             }
 
             is FailoverDecision.Exhausted -> {
-                val countryName = _uiState.value.selectedCountry?.countryName
-                val failureMessage = decision.reason
-                    ?: countryName?.let { getString(R.string.mcqueen_all_candidates_failed, it) }
-                    ?: getString(R.string.mcqueen_status_hint_failed)
+                val displayDetail = decision.reason.takeIf { it.isNotBlank() }
+                    ?: app.getString(R.string.mcqueen_all_candidates_failed, countryName)
                 _uiState.update {
                     it.copy(
                         connectionState = VpnConnectionState.FAILED,
-                        statusDetail = failureMessage,
+                        statusDetail = displayDetail,
                         downloadBps = 0L,
                         uploadBps = 0L,
-                        sessionStartMs = 0L,
-                        sessionDurationText = "00:00:00",
+                        sessionDownloadedBytes = 0L,
+                        sessionUploadedBytes = 0L,
+                        sessionDurationSeconds = 0L,
                     )
                 }
+                _snackbarEvents.tryEmit(app.getString(R.string.mcqueen_status_hint_failed))
             }
         }
     }
 
-    private fun handleServiceStopped(preserveFailure: Boolean) {
-        val nextState = coordinator.onServiceStopped(preserveFailure = preserveFailure)
-        if (nextState == VpnConnectionState.RECONNECTING) {
-            return
-        }
-        connectionTimeoutJob?.cancel()
-        verifyTunnelJob?.cancel()
-        pendingVerifyRequestId = null
+    fun disconnectVpn() {
+        sessionCoordinator.onUserDisconnect()
+        connectJob?.cancel()
+        failoverJob?.cancel()
+        cancelConnectionGuards()
         stopDurationTicker()
+        LauncherManager.stopService(getApplication())
+        isServiceRunning.set(false)
         _uiState.update {
             it.copy(
-                connectionState = nextState,
-                statusDetail = if (nextState == VpnConnectionState.FAILED) it.statusDetail else null,
+                connectionState = VpnConnectionState.DISCONNECTED,
+                statusDetail = "",
                 downloadBps = 0L,
                 uploadBps = 0L,
-                sessionStartMs = 0L,
-                sessionDurationText = "00:00:00",
+                sessionDownloadedBytes = 0L,
+                sessionUploadedBytes = 0L,
+                sessionDurationSeconds = 0L,
             )
         }
     }
 
-    private fun handleTrafficStats(snapshot: TrafficStatsSnapshot) {
-        if (snapshot.sessionStartMs > 0L) {
-            startDurationTicker(snapshot.sessionStartMs)
-        }
-        _uiState.update { state ->
-            val effectiveStart = if (snapshot.sessionStartMs > 0L) snapshot.sessionStartMs else state.sessionStartMs
-            state.copy(
-                downloadBps = snapshot.downlinkBps.coerceAtLeast(0L),
-                uploadBps = snapshot.uplinkBps.coerceAtLeast(0L),
-                sessionStartMs = effectiveStart,
-                sessionDurationText = if (effectiveStart > 0L) {
-                    ConnectionSessionCoordinator.formatDuration(System.currentTimeMillis() - effectiveStart)
-                } else {
-                    "00:00:00"
-                },
+    fun onVpnPermissionDenied() {
+        sessionCoordinator.onUserDisconnect()
+        cancelConnectionGuards()
+        _uiState.update {
+            it.copy(
+                connectionState = VpnConnectionState.DISCONNECTED,
+                statusDetail = "",
+                downloadBps = 0L,
+                uploadBps = 0L,
+                sessionDownloadedBytes = 0L,
+                sessionUploadedBytes = 0L,
             )
         }
+        _snackbarEvents.tryEmit(getApplication<Application>().getString(R.string.mcqueen_vpn_permission_denied))
     }
 
-    private fun startDurationTicker(sessionStartMs: Long) {
-        if (sessionStartMs <= 0L) return
-        if (durationTickerJob?.isActive == true && _uiState.value.sessionStartMs == sessionStartMs) return
-        durationTickerJob?.cancel()
+    fun launchServiceAfterPermission() {
+        val guid = sessionCoordinator.currentGuid() ?: MmkvManager.getSelectServer()
+        if (guid == null) {
+            connectSelectedCountry()
+            return
+        }
+        LauncherManager.startService(getApplication(), guid)
+    }
+
+    private fun startDurationTicker() {
+        if (durationTickerJob?.isActive == true) return
+        val daemonSessionStart = CoreServiceManager.getSessionStartTimeMs()
+        sessionStartTimeMs = if (daemonSessionStart > 0L) daemonSessionStart else System.currentTimeMillis()
         durationTickerJob = viewModelScope.launch {
             while (isActive) {
-                val elapsed = System.currentTimeMillis() - sessionStartMs
-                _uiState.update {
-                    it.copy(sessionDurationText = ConnectionSessionCoordinator.formatDuration(elapsed))
+                val latestDaemonStart = CoreServiceManager.getSessionStartTimeMs()
+                if (latestDaemonStart > 0L) {
+                    sessionStartTimeMs = latestDaemonStart
                 }
+                val elapsed = ((System.currentTimeMillis() - sessionStartTimeMs) / 1000L).coerceAtLeast(0L)
+                _uiState.update { it.copy(sessionDurationSeconds = elapsed) }
                 delay(1000L)
             }
         }
@@ -636,58 +1038,33 @@ class McQueenViewModel(application: Application) : BaseViewModel(application) {
     private fun stopDurationTicker() {
         durationTickerJob?.cancel()
         durationTickerJob = null
+        sessionStartTimeMs = 0L
     }
 
-    private fun cancelAttemptGuards() {
-        failoverJob?.cancel()
-        connectionTimeoutJob?.cancel()
-        verifyTunnelJob?.cancel()
-        pendingVerifyRequestId = null
+    private fun registerServiceReceiver() {
+        if (isReceiverRegistered) return
+        ContextCompat.registerReceiver(
+            getApplication(),
+            mMsgReceiver,
+            IntentFilter(AppConfig.BROADCAST_ACTION_ACTIVITY),
+            Utils.receiverFlags()
+        )
+        isReceiverRegistered = true
     }
 
-    private fun applyCountries(countries: List<CountryUiModel>, updatedAt: String?) {
-        val savedCode = MmkvManager.decodeSettingsString(KEY_SELECTED_COUNTRY_CODE).orEmpty()
-        val savedName = MmkvManager.decodeSettingsString(AppConfig.PREF_MCQUEEN_SELECTED_COUNTRY).orEmpty()
-        val resolvedSelected = countries.firstOrNull { it.countryCode == savedCode }
-            ?: countries.firstOrNull { it.countryName.equals(savedName, ignoreCase = true) }
-            ?: countries.firstOrNull()
-
-        if (resolvedSelected != null) {
-            persistSelectedCountry(resolvedSelected)
+    private fun unregisterServiceReceiver() {
+        if (!isReceiverRegistered) return
+        try {
+            getApplication<Application>().unregisterReceiver(mMsgReceiver)
+        } catch (e: Exception) {
+            LogUtil.w(AppConfig.TAG, "Failed to unregister McQueen service receiver", e)
         }
-
-        _uiState.update {
-            it.copy(
-                countries = countries,
-                selectedCountry = resolvedSelected,
-                manifestUpdatedAt = updatedAt,
-            )
-        }
-    }
-
-    private fun ensureSelectedCountry(): CountryUiModel? {
-        val current = _uiState.value.selectedCountry
-        if (current != null) return current
-        val fallback = _uiState.value.countries.firstOrNull() ?: return null
-        persistSelectedCountry(fallback)
-        _uiState.update { it.copy(selectedCountry = fallback) }
-        return fallback
-    }
-
-    private fun persistSelectedCountry(country: CountryUiModel) {
-        MmkvManager.encodeSettings(AppConfig.PREF_MCQUEEN_SELECTED_COUNTRY, country.countryName)
-        MmkvManager.encodeSettings(KEY_SELECTED_COUNTRY_CODE, country.countryCode)
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        stopDurationTicker()
-        cancelAttemptGuards()
-        latencyJob?.cancel()
-        stopListenBroadcast()
+        isReceiverRegistered = false
     }
 
     companion object {
-        private const val KEY_SELECTED_COUNTRY_CODE = "pref_mcqueen_selected_country_code"
+        private const val CANDIDATE_CONNECTION_TIMEOUT_MS = 18_000L
+        private const val SERVICE_STOP_AWAIT_TIMEOUT_MS = 3_500L
+        private const val SERVICE_STOP_POLL_INTERVAL_MS = 40L
     }
 }
