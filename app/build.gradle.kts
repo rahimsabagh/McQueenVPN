@@ -23,7 +23,7 @@ android {
             ?.trim()
             ?.removePrefix("v")
             ?.removePrefix("V")
-            ?.takeIf { it.isNotEmpty() }
+            ?.takeIf { it.isNotEmpty() && it.first().isDigit() }
             ?: "1.0.0-beta.2"
         versionCode = configuredVersionCode
         versionName = configuredVersionName

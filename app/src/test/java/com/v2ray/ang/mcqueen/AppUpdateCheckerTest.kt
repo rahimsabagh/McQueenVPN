@@ -42,8 +42,12 @@ class AppUpdateCheckerTest {
             "https://api.github.com/repos/rahimsabagh/McQueenVPN/releases/latest",
             AppConfig.APP_LATEST_RELEASE_API_URL,
         )
-        assertEquals("1.0.0-beta.2", com.v2ray.ang.BuildConfig.VERSION_NAME)
-        assertEquals(762, com.v2ray.ang.BuildConfig.VERSION_CODE)
+        assertTrue(com.v2ray.ang.BuildConfig.VERSION_NAME.isNotBlank())
+        assertNotNull(
+            SemanticVersion.parse(com.v2ray.ang.BuildConfig.VERSION_NAME),
+            "Expected BuildConfig.VERSION_NAME '${com.v2ray.ang.BuildConfig.VERSION_NAME}' to be a valid semantic version",
+        )
+        assertTrue(com.v2ray.ang.BuildConfig.VERSION_CODE >= 761)
     }
 
     @Test
