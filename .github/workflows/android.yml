@@ -266,7 +266,7 @@ jobs:
           fi
 
       - name: Upload debug build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: McQueenVPN-${{ env.RELEASE_TAG }}-debug
           path: |
@@ -277,7 +277,7 @@ jobs:
 
       - name: Upload signed release build artifacts
         if: steps.build_apks.outputs.signed_release == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: McQueenVPN-${{ env.RELEASE_TAG }}-release
           path: |

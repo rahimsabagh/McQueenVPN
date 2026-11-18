@@ -277,7 +277,7 @@ jobs:
           cp release-dist/SHA256SUMS.txt "$RUNNER_TEMP/aab-sha256.txt"
 
       - name: Upload signed Release AAB
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: McQueenVPN-release-AAB
           path: release-dist/*.aab
@@ -285,7 +285,7 @@ jobs:
           retention-days: 30
 
       - name: Upload signed Release APKs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: McQueenVPN-release-APK
           path: release-dist/*.apk
@@ -293,7 +293,7 @@ jobs:
           retention-days: 30
 
       - name: Upload SHA256 checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: McQueenVPN-release-sha256
           path: release-dist/SHA256SUMS.txt
