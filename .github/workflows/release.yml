@@ -26,7 +26,7 @@ jobs:
     name: Build signed Android App Bundle & ABI APKs
     runs-on: ubuntu-latest
     env:
-      GO_VERSION: "1.24"
+      GO_VERSION: "1.26"
       NDK_VERSION: "27.2.12479018"
       RELEASE_TAG: ${{ inputs.release_tag || 'v1.0.0-beta.4' }}
 
@@ -105,6 +105,17 @@ jobs:
           fi
           if [[ -f "aether/aether/Cargo.toml" ]]; then
             bash compile-aether.sh
+          fi
+          if [[ -f "aether/psiphon-build.sh" || -f "aether/pt-build.sh" ]]; then
+            echo "Go binary: $(command -v go)"
+            go version
+            go_semver="$(go version | sed -nE 's/^go version go([0-9]+)\.([0-9]+).*/\1.\2/p')"
+            go_major="${go_semver%%.*}"
+            go_minor="${go_semver#*.}"
+            if [[ -z "$go_major" || -z "$go_minor" ]] || (( go_major < 1 || (go_major == 1 && go_minor < 26) )); then
+              echo "::error::Installed Go version ($(go version)) does not satisfy >= go1.26.0"
+              exit 1
+            fi
           fi
           if [[ -f "aether/psiphon-build.sh" ]]; then
             bash compile-psiphon.sh
