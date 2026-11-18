@@ -149,9 +149,14 @@ jobs:
         run: |
           gradle --no-daemon \
             -PmcqueenVersionName="${RELEASE_TAG}" \
+            -PenableAbiSplits=true \
             :app:testDebugUnitTest \
-            :app:bundleRelease \
             :app:assembleRelease
+
+          gradle --no-daemon \
+            -PmcqueenVersionName="${RELEASE_TAG}" \
+            -PenableAbiSplits=false \
+            :app:bundleRelease
 
       - name: Clean up temporary release keystore
         if: always()

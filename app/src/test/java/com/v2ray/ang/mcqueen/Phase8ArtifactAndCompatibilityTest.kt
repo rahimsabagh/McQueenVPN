@@ -236,6 +236,19 @@ class Phase8ArtifactAndCompatibilityTest {
             assertTrue(content.contains("rm -f \"\$RUNNER_TEMP/release.jks\""), "$relPath must clean up temporary keystore")
             assertTrue(content.contains("-c -P 16 -v 4"), "$relPath must validate 16 KB zipalign")
             assertTrue(content.contains("verify --verbose --print-certs"), "$relPath must verify APK signatures")
+            assertTrue(
+                content.contains("-PenableAbiSplits=true") && content.contains(":app:assembleRelease"),
+                "$relPath must build Release split APKs with -PenableAbiSplits=true"
+            )
+            assertTrue(
+                content.contains("-PenableAbiSplits=false") && content.contains(":app:bundleRelease"),
+                "$relPath must build Release AAB with -PenableAbiSplits=false in a separate invocation"
+            )
+            assertFalse(
+                content.contains(":app:assembleRelease :app:bundleRelease") ||
+                    content.contains(":app:bundleRelease :app:assembleRelease"),
+                "$relPath must not combine :app:assembleRelease and :app:bundleRelease in the same Gradle invocation"
+            )
 
             for (lib in listOf("libaether.so", "libgojni.so", "libpsiphon-tunnel-core.so", "liblyrebird.so", "libhev-socks5-tunnel.so", "libhevsockstun.so", "libmmkv.so")) {
                 assertTrue(content.contains(lib), "$relPath must validate presence of $lib")

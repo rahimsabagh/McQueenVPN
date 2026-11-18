@@ -151,7 +151,13 @@ jobs:
             RELEASE_STORE_PASSWORD="$STORE_PASSWORD" \
             RELEASE_KEY_ALIAS="$KEY_ALIAS" \
             RELEASE_KEY_PASSWORD="$KEY_PASSWORD" \
-              gradle --no-daemon -PmcqueenVersionName="${EFFECTIVE_TAG}" :app:assembleRelease :app:bundleRelease
+              gradle --no-daemon -PmcqueenVersionName="${EFFECTIVE_TAG}" -PenableAbiSplits=true :app:assembleRelease
+
+            RELEASE_STORE_FILE="$keystore_path" \
+            RELEASE_STORE_PASSWORD="$STORE_PASSWORD" \
+            RELEASE_KEY_ALIAS="$KEY_ALIAS" \
+            RELEASE_KEY_PASSWORD="$KEY_PASSWORD" \
+              gradle --no-daemon -PmcqueenVersionName="${EFFECTIVE_TAG}" -PenableAbiSplits=false :app:bundleRelease
 
             for abi in arm64-v8a armeabi-v7a universal; do
               rel_src="app/build/outputs/apk/release/app-${abi}-release.apk"

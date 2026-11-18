@@ -10,6 +10,48 @@ android {
     namespace = "com.v2ray.ang"
     compileSdk = 36
 
+    val includeX86_64 = (project.findProperty("includeX86_64") as? String)?.toBoolean() == true
+    val productionAbis = if (includeX86_64) {
+        listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    } else {
+        listOf("arm64-v8a", "armeabi-v7a")
+    }
+
+    val requestedTaskNames = gradle.startParameter.taskNames
+    val isBundleTaskRequested = requestedTaskNames.any { taskName ->
+        val simpleName = taskName.substringAfterLast(':')
+        simpleName.startsWith("bundle", ignoreCase = true) ||
+            simpleName.contains("Bundle", ignoreCase = false) ||
+            simpleName.contains("PreBundle", ignoreCase = false)
+    }
+    val isApkAssembleTaskRequested = requestedTaskNames.any { taskName ->
+        val simpleName = taskName.substringAfterLast(':')
+        (simpleName.startsWith("assemble", ignoreCase = true) ||
+            simpleName.startsWith("package", ignoreCase = true)) &&
+            !simpleName.contains("Bundle", ignoreCase = true) &&
+            !simpleName.contains("Test", ignoreCase = true)
+    }
+    val explicitAbiSplits = (project.findProperty("enableAbiSplits") as? String)
+        ?.trim()
+        ?.lowercase()
+        ?.let {
+            when (it) {
+                "true" -> true
+                "false" -> false
+                else -> null
+            }
+        }
+    if (explicitAbiSplits == null && isBundleTaskRequested && isApkAssembleTaskRequested) {
+        throw GradleException(
+            "Cannot run APK assemble tasks ($requestedTaskNames) and App Bundle tasks in the same Gradle invocation " +
+                "when both ABI splits and resource shrinking (isShrinkResources = true) are enabled, because shrinkReleaseRes " +
+                "produces multiple per-ABI shrunk-resources-proto-format-*.ap_ archives that conflict with PerModuleBundleTask " +
+                "(:app:buildReleasePreBundle). Run ':app:assembleRelease' (-PenableAbiSplits=true) and ':app:bundleRelease' " +
+                "(-PenableAbiSplits=false) in separate Gradle invocations."
+        )
+    }
+    val enableAbiSplits = explicitAbiSplits ?: !isBundleTaskRequested
+
     defaultConfig {
         applicationId = "com.aistudio.mcqueenvpn.rmqvpn"
         minSdk = 29
@@ -30,6 +72,12 @@ android {
         buildConfigField("String", "DISTRIBUTION", "\"Play Store\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        if (!enableAbiSplits) {
+            ndk {
+                abiFilters += productionAbis
+            }
+        }
     }
 
     signingConfigs {
@@ -143,19 +191,14 @@ android {
         }
     }
 
-    val includeX86_64 = (project.findProperty("includeX86_64") as? String)?.toBoolean() == true
-    val productionAbis = if (includeX86_64) {
-        listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-    } else {
-        listOf("arm64-v8a", "armeabi-v7a")
-    }
-
     splits {
         abi {
-            isEnable = true
+            isEnable = enableAbiSplits
             reset()
-            include(*productionAbis.toTypedArray())
-            isUniversalApk = true
+            if (enableAbiSplits) {
+                include(*productionAbis.toTypedArray())
+                isUniversalApk = true
+            }
         }
     }
 
@@ -363,4 +406,40 @@ tasks.named("preBuild") {
     dependsOn(ensureLibv2rayAar)
 }
 
+tasks.matching { it.name == "minifyReleaseWithR8" || it.name == "shrinkReleaseRes" }.configureEach {
+    doFirst {
+        val candidateDirs = listOf(
+            layout.buildDirectory.dir("intermediates/shrunk_resources_proto_format/release").get().asFile,
+            layout.buildDirectory.dir("intermediates/shrunk_resources_proto_format/release/minifyReleaseWithR8").get().asFile
+        )
+        candidateDirs.forEach { dir ->
+            if (dir.isDirectory) {
+                dir.listFiles()?.forEach { file ->
+                    if (file.isFile && file.name.endsWith(".ap_")) {
+                        file.delete()
+                    }
+                }
+            }
+        }
+    }
+}
+
+tasks.matching { it.name == "buildReleasePreBundle" }.configureEach {
+    doFirst {
+        val candidateDirs = listOf(
+            layout.buildDirectory.dir("intermediates/shrunk_resources_proto_format/release").get().asFile,
+            layout.buildDirectory.dir("intermediates/shrunk_resources_proto_format/release/minifyReleaseWithR8").get().asFile
+        )
+        candidateDirs.forEach { shrunkProtoDir ->
+            val singleBundleAp = File(shrunkProtoDir, "shrunk-resources-proto-format-release.ap_")
+            if (shrunkProtoDir.isDirectory && singleBundleAp.isFile) {
+                shrunkProtoDir.listFiles()?.forEach { file ->
+                    if (file.isFile && file.name.endsWith(".ap_") && file.name != singleBundleAp.name) {
+                        file.delete()
+                    }
+                }
+            }
+        }
+    }
+}
 
