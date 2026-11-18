@@ -283,7 +283,7 @@ jobs:
 
       - name: Publish Signed GitHub Release
         if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true && steps.build_apks.outputs.signed_release == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.EFFECTIVE_TAG }}
           name: McQueen VPN ${{ env.EFFECTIVE_TAG }}
