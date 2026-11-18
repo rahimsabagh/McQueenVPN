@@ -302,7 +302,7 @@ jobs:
 
       - name: Publish GitHub Release
         if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true && env.RELEASE_TAG != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: McQueen VPN ${{ env.RELEASE_TAG }}
