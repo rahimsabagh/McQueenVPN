@@ -118,6 +118,9 @@ object AppConfig {
     const val PREF_MCQUEEN_SELECTED_COUNTRY_CODE = "pref_mcqueen_selected_country_code"
     const val PREF_MCQUEEN_BATTERY_PROMPT_SHOWN = "pref_mcqueen_battery_prompt_shown"
     const val PREF_MCQUEEN_BYPASS_IRAN = "pref_mcqueen_bypass_iran"
+    const val PREF_MCQUEEN_MANIFEST_LAST_SYNC_MS = "pref_mcqueen_manifest_last_sync_ms"
+    const val PREF_MCQUEEN_MANIFEST_SUMMARY_CACHE = "pref_mcqueen_manifest_summary_cache"
+    const val PREF_MCQUEEN_MANIFEST_VALIDATOR = "pref_mcqueen_manifest_validator"
 
     /** Protocol identifiers. */
     const val PROTOCOL_FREEDOM = "freedom"

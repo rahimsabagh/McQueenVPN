@@ -28,7 +28,6 @@ import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
 import java.lang.ref.SoftReference
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 @SuppressLint("VpnServicePolicy")
 class CoreVpnService : VpnService(), ServiceControl {
@@ -67,31 +66,37 @@ class CoreVpnService : VpnService(), ServiceControl {
         val wasRunning = isRunning || CoreServiceManager.isServiceRunning()
         startGate.markDestroyed()
         isRunning = false
-
-        runCatching {
-            vpnExecutor.submit {
-                performTeardown(notifyUiStop = wasRunning)
-            }.get(2_500L, TimeUnit.MILLISECONDS)
-        }.onFailure { e ->
-            LogUtil.w(AppConfig.TAG, "StartCore-VPN: Timed out or failed waiting for teardown in onDestroy", e)
-        }
-
-        val remaining = mInterface
-        mInterface = null
-        if (remaining != null) {
-            runCatching {
-                remaining.close()
-                LogUtil.i(AppConfig.TAG, "StartCore-VPN: VPN interface closed in onDestroy")
-            }.onFailure { e ->
-                LogUtil.e(AppConfig.TAG, "StartCore-VPN: Failed to close interface in onDestroy", e)
-            }
-        }
-
+        mainHandler.removeCallbacksAndMessages(null)
         NotificationManager.cancelNotification(this)
+
+        val appCtx = applicationContext
         if (CoreServiceManager.serviceControl?.get() === this) {
             CoreServiceManager.serviceControl = null
         }
-        vpnExecutor.shutdownNow()
+
+        val submitted = runCatching {
+            vpnExecutor.execute {
+                performTeardown(notifyUiStop = wasRunning, fallbackContext = appCtx)
+            }
+            true
+        }.getOrDefault(false)
+
+        if (!submitted) {
+            runCatching { tun2SocksService?.stopTun2Socks() }
+            tun2SocksService = null
+            val remaining = mInterface
+            mInterface = null
+            if (remaining != null) {
+                runCatching {
+                    remaining.close()
+                    LogUtil.i(AppConfig.TAG, "StartCore-VPN: VPN interface closed in onDestroy")
+                }.onFailure { e ->
+                    LogUtil.e(AppConfig.TAG, "StartCore-VPN: Failed to close interface in onDestroy", e)
+                }
+            }
+        }
+
+        vpnExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -129,6 +134,17 @@ class CoreVpnService : VpnService(), ServiceControl {
         stopAllService(isForced = true)
     }
 
+    override fun restartService() {
+        NotificationManager.ensureForeground(this)
+        val currentStartId = startGate.currentStartId()
+        val opGen = startGate.beginStart(currentStartId)
+        if (opGen < 0L) return
+        MessageHelper.sendMsg2UI(this, AppConfig.MSG_STATE_CONNECTING, "")
+        vpnExecutor.execute {
+            performStart(opGen, currentStartId)
+        }
+    }
+
     override fun vpnProtect(socket: Int): Boolean {
         return protect(socket)
     }
@@ -158,6 +174,9 @@ class CoreVpnService : VpnService(), ServiceControl {
         }
 
         if (!setupVpnService()) {
+            if (startGate.shouldContinueStart(opGen)) {
+                MessageHelper.sendMsg2UI(this, AppConfig.MSG_STATE_START_FAILURE, "")
+            }
             performTeardown(notifyUiStop = false)
             scheduleStopForegroundAndSelf(opGen, startId)
             return
@@ -172,14 +191,17 @@ class CoreVpnService : VpnService(), ServiceControl {
         val vpnPfd = mInterface
         if (vpnPfd == null) {
             LogUtil.e(AppConfig.TAG, "StartCore-VPN: Interface not initialized")
-            performTeardown(notifyUiStop = true)
+            if (startGate.shouldContinueStart(opGen)) {
+                MessageHelper.sendMsg2UI(this, AppConfig.MSG_STATE_START_FAILURE, "")
+            }
+            performTeardown(notifyUiStop = false)
             scheduleStopForegroundAndSelf(opGen, startId)
             return
         }
 
         if (!CoreServiceManager.startCoreLoop(vpnPfd)) {
             LogUtil.e(AppConfig.TAG, "StartCore-VPN: Failed to start core loop")
-            performTeardown(notifyUiStop = true)
+            performTeardown(notifyUiStop = false)
             scheduleStopForegroundAndSelf(opGen, startId)
             return
         }
@@ -187,14 +209,16 @@ class CoreVpnService : VpnService(), ServiceControl {
         // tun2socks sets itself up on its own thread while Xray starts and ends without a word when
         // that fails. This one look, at the end of the start, is what tells; nothing looks again.
         if (!Tun2SocksControl.startMayGoOn(tun2SocksService) { it.isTun2SocksRunning() }) {
-            failTun2Socks("gave up while setting itself up")
-            performTeardown(notifyUiStop = true)
+            if (startGate.shouldContinueStart(opGen)) {
+                failTun2Socks("gave up while setting itself up")
+            }
+            performTeardown(notifyUiStop = false)
             scheduleStopForegroundAndSelf(opGen, startId)
             return
         }
 
         if (!startGate.shouldContinueStart(opGen)) {
-            performTeardown(notifyUiStop = true)
+            performTeardown(notifyUiStop = false)
             return
         }
 
@@ -219,7 +243,7 @@ class CoreVpnService : VpnService(), ServiceControl {
         }
 
         if (!runTun2socks()) {
-            failTun2Socks("could not be started")
+            LogUtil.e(AppConfig.TAG, "StartCore-VPN: tun2socks could not be started, guid=${MmkvManager.getSelectServer()}")
             return false
         }
         return true
@@ -426,33 +450,29 @@ class CoreVpnService : VpnService(), ServiceControl {
         }
     }
 
-    private fun performTeardown(notifyUiStop: Boolean) {
+    private fun performTeardown(notifyUiStop: Boolean, fallbackContext: Context = applicationContext) {
         isRunning = false
 
         runCatching { tun2SocksService?.stopTun2Socks() }
             .onFailure { e -> LogUtil.w(AppConfig.TAG, "StartCore-VPN: Failed stopping tun2socks", e) }
         tun2SocksService = null
 
-        runCatching { RootLanSharing.stopClientSharing(this) }
+        runCatching { RootLanSharing.stopClientSharing(fallbackContext) }
             .onFailure { e -> LogUtil.w(AppConfig.TAG, "StartCore-VPN: Failed stopping LAN sharing", e) }
 
         val hadCore = CoreServiceManager.isServiceRunning()
         if (notifyUiStop || hadCore) {
-            CoreServiceManager.stopCoreLoop(cancelForeground = false)
+            CoreServiceManager.stopCoreLoop(
+                cancelForeground = false,
+                fallbackContext = fallbackContext,
+                emitStopBroadcast = notifyUiStop,
+                notifyEvenIfIdle = notifyUiStop,
+            )
         }
 
         val pfd = mInterface
         mInterface = null
         if (pfd != null) {
-            if (hadCore) {
-                // Allow Xray core a brief window off the main thread to drain sockets before closing fd
-                // so a rapid reconnect does not observe stale tunnel state in status bar.
-                try {
-                    Thread.sleep(100)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                }
-            }
             runCatching {
                 pfd.close()
                 LogUtil.i(AppConfig.TAG, "StartCore-VPN: VPN interface closed")

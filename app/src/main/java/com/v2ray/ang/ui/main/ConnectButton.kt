@@ -14,7 +14,6 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -37,13 +36,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -52,6 +51,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -66,6 +66,9 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.currentStateAsState
 import com.v2ray.ang.R
 import com.v2ray.ang.mcqueen.VpnConnectionState
 import com.v2ray.ang.ui.compose.AppTheme
@@ -124,6 +127,26 @@ data class ConnectButtonPalette(
     val accentColor: Color,
     val statusLedColor: Color,
 )
+
+internal const val CONNECTED_HALO_STATIC_ALPHA = 0.28f
+
+/**
+ * Determines whether the orbital connecting ring infinite animation should run.
+ * Only active while [state] is [ConnectButtonState.Connecting] and the host UI is visible.
+ */
+internal fun shouldAnimateConnectRing(
+    state: ConnectButtonState,
+    isVisible: Boolean,
+): Boolean = isVisible && state == ConnectButtonState.Connecting
+
+/**
+ * Determines whether the connected ambient halo pulse animation should run.
+ * Only active while [state] is [ConnectButtonState.Connected] and the host UI is visible.
+ */
+internal fun shouldAnimateConnectedHalo(
+    state: ConnectButtonState,
+    isVisible: Boolean,
+): Boolean = isVisible && state == ConnectButtonState.Connected
 
 /**
  * Maps domain [VpnConnectionState] to the three-state [ConnectButtonState] machine.
@@ -236,6 +259,9 @@ fun ConnectButton(
         )
     }
 
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
+    val isLifecycleStarted = lifecycleState.isAtLeast(Lifecycle.State.STARTED)
+
     val labelText = when (state) {
         ConnectButtonState.Disconnected -> when {
             needsLocation -> stringResource(R.string.mcqueen_action_choose_location)
@@ -266,7 +292,7 @@ fun ConnectButton(
 
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(
+    val pressScaleState = animateFloatAsState(
         targetValue = if (isPressed && enabled) 0.96f else 1f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioMediumBouncy,
@@ -280,18 +306,18 @@ fun ConnectButton(
         ConnectButtonState.Connecting -> palette.accentColor.copy(alpha = 0.16f)
         ConnectButtonState.Connected -> palette.chassisRim
     }
-    val trackColor by animateColorAsState(
+    val trackColorState = animateColorAsState(
         targetValue = targetTrackColor,
         animationSpec = tween(durationMillis = 500),
         label = "connect_orb_track_color",
     )
 
-    val plateTop by animateColorAsState(
+    val plateTopState = animateColorAsState(
         targetValue = palette.plateTop,
         animationSpec = tween(durationMillis = 240),
         label = "connect_orb_plate_top",
     )
-    val plateBottom by animateColorAsState(
+    val plateBottomState = animateColorAsState(
         targetValue = palette.plateBottom,
         animationSpec = tween(durationMillis = 240),
         label = "connect_orb_plate_bottom",
@@ -312,12 +338,13 @@ fun ConnectButton(
         label = "connect_orb_label_color",
     )
 
-    // Matches .mcq-spin (1.8s linear infinite) and .mcq-dash (1.8s ease-in-out infinite)
-    val spinAngle: Float
-    val dashPhase: Float
-    if (state == ConnectButtonState.Connecting) {
+    // Matches .mcq-spin (1.8s linear infinite) and .mcq-dash (1.8s ease-in-out infinite).
+    // State<Float> references are kept unread in composition and sampled inside Canvas draw phase.
+    val spinAngleState: State<Float>?
+    val dashPhaseState: State<Float>?
+    if (shouldAnimateConnectRing(state = state, isVisible = isLifecycleStarted)) {
         val transition = rememberInfiniteTransition(label = "connect_orb_mcq_ring")
-        val animatedSpin by transition.animateFloat(
+        spinAngleState = transition.animateFloat(
             initialValue = 0f,
             targetValue = 360f,
             animationSpec = infiniteRepeatable(
@@ -326,7 +353,7 @@ fun ConnectButton(
             ),
             label = "mcq_spin_angle",
         )
-        val animatedDash by transition.animateFloat(
+        dashPhaseState = transition.animateFloat(
             initialValue = 0f,
             targetValue = 1f,
             animationSpec = infiniteRepeatable(
@@ -335,16 +362,14 @@ fun ConnectButton(
             ),
             label = "mcq_dash_phase",
         )
-        spinAngle = animatedSpin
-        dashPhase = animatedDash
     } else {
-        spinAngle = 0f
-        dashPhase = 0f
+        spinAngleState = null
+        dashPhaseState = null
     }
 
-    val connectedHaloAlpha = if (state == ConnectButtonState.Connected) {
+    val connectedHaloAlphaState: State<Float>? = if (shouldAnimateConnectedHalo(state = state, isVisible = isLifecycleStarted)) {
         val transition = rememberInfiniteTransition(label = "connect_orb_halo")
-        val alpha by transition.animateFloat(
+        transition.animateFloat(
             initialValue = 0.24f,
             targetValue = 0.36f,
             animationSpec = infiniteRepeatable(
@@ -353,9 +378,8 @@ fun ConnectButton(
             ),
             label = "connect_orb_halo_alpha",
         )
-        alpha
     } else {
-        0f
+        null
     }
 
     val iconSizeDp = (buttonSize * (54f / 188f)).coerceIn(38.dp, 54.dp)
@@ -363,7 +387,11 @@ fun ConnectButton(
     Box(
         modifier = modifier
             .size(ringSize)
-            .scale(pressScale)
+            .graphicsLayer {
+                val s = pressScaleState.value
+                scaleX = s
+                scaleY = s
+            }
             .clip(CircleShape)
             .clickable(
                 interactionSource = interactionSource,
@@ -374,7 +402,10 @@ fun ConnectButton(
             .drawBehind {
                 // Soft outer ambient ring glow matching the mockup's box-shadow
                 val glowColor = when (state) {
-                    ConnectButtonState.Connected -> palette.accentColor.copy(alpha = connectedHaloAlpha)
+                    ConnectButtonState.Connected -> {
+                        val haloAlpha = connectedHaloAlphaState?.value ?: CONNECTED_HALO_STATIC_ALPHA
+                        palette.accentColor.copy(alpha = haloAlpha)
+                    }
                     ConnectButtonState.Connecting -> palette.accentColor.copy(alpha = 0.18f)
                     ConnectButtonState.Disconnected -> Color.Transparent
                 }
@@ -407,12 +438,14 @@ fun ConnectButton(
 
             // Outer 5dp track ring with 0.5s ease transition
             drawCircle(
-                color = trackColor,
+                color = trackColorState.value,
                 radius = strokeRadius,
                 style = Stroke(width = ringThickness),
             )
 
             if (state == ConnectButtonState.Connecting) {
+                val spinAngle = spinAngleState?.value ?: 0f
+                val dashPhase = dashPhaseState?.value ?: 0f
                 // Exact replica of:
                 // @keyframes mcqdash {
                 //   0%   { stroke-dasharray: 24 790;  stroke-dashoffset: 0 }
@@ -497,11 +530,13 @@ fun ConnectButton(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(plateTop, plateBottom)
+                        .drawBehind {
+                            drawRect(
+                                brush = Brush.verticalGradient(
+                                    colors = listOf(plateTopState.value, plateBottomState.value)
+                                )
                             )
-                        ),
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(

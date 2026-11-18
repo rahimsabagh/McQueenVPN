@@ -39,6 +39,22 @@ object McQueenServerConfig {
     const val TUNNEL_VERIFY_TIMEOUT_MS = 15_000L
     const val MANIFEST_REFRESH_INTERVAL_MINUTES = 30L
     const val MANIFEST_REFRESH_TASK_NAME = "mcqueen_manifest_updater"
+    const val MANIFEST_CACHE_TTL_MS = MANIFEST_REFRESH_INTERVAL_MINUTES * 60L * 1000L
+
+    fun isManifestCacheFresh(
+        lastSyncedAtMs: Long,
+        nowMs: Long = System.currentTimeMillis(),
+        ttlMs: Long = MANIFEST_CACHE_TTL_MS,
+    ): Boolean {
+        return lastSyncedAtMs > 0L && nowMs >= lastSyncedAtMs && (nowMs - lastSyncedAtMs) < ttlMs
+    }
+
+    fun shouldAutoSyncManifestOnStartup(
+        hasUsableManifest: Boolean,
+        isCacheFresh: Boolean,
+    ): Boolean {
+        return !hasUsableManifest || !isCacheFresh
+    }
 
     fun resolveActiveUrl(storedUrl: String?): String {
         val candidate = storedUrl?.trim().orEmpty()

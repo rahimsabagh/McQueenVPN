@@ -1,6 +1,6 @@
 # McQueen VPN
 
-**Version:** `1.0.0-beta.2` (`versionCode` 762)  
+**Version:** `1.0.0-beta.4` (`versionCode` 764)  
 **Package ID:** `com.aistudio.mcqueenvpn.rmqvpn`
 
 McQueen VPN is a minimalist, user-friendly Android VPN built with Kotlin and Jetpack Compose. It is designed around a one-tap workflow—open the app, pick a country, and tap Connect—while automatically managing server probing, dual-engine routing (Xray-core and Aether), first-run WARP identity registration, and same-country failover behind the scenes.
@@ -23,8 +23,8 @@ McQueen VPN is a minimalist, user-friendly Android VPN built with Kotlin and Jet
 ## Requirements & Targets
 
 - **Minimum Android Version:** Android 10 (API 29)
-- **Target / Compile SDK:** API 36 (Android 16)
-- **Bundled Native ABIs:** `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`
+- **Target / Compile SDK:** API 36 (Android 16, 16 KB page-size aligned)
+- **Production Native ABIs:** `arm64-v8a` (64-bit ARM, 16 KB aligned), `armeabi-v7a` (32-bit ARM) *(optional `x86_64` emulator development mode via `-PincludeX86_64=true`)*
 - **Build Toolchain:** Java 17, Kotlin, Gradle Kotlin DSL, Jetpack Compose (Material 3)
 
 ---
@@ -37,7 +37,7 @@ McQueen VPN is a minimalist, user-friendly Android VPN built with Kotlin and Jet
 # Run JVM unit tests
 ./gradlew :app:testDebugUnitTest
 
-# Build debug APK (signed with repository debug keystore)
+# Build debug ABI split & universal APKs (signed with repository debug keystore)
 ./gradlew :app:assembleDebug
 
 # Run Android Lint
@@ -46,11 +46,14 @@ McQueen VPN is a minimalist, user-friendly Android VPN built with Kotlin and Jet
 
 > **Note for CI / Container Environments:** If the Gradle wrapper (`./gradlew`) is unavailable or restricted in your build environment, invoke the pre-installed `gradle` binary directly (e.g., `gradle :app:assembleDebug`).
 
-### Install Pre-Built Beta APK
+### Install Pre-Built Beta APK (`v1.0.0-beta.4`)
 
-1. Download `McQueenVPN-v1.0.0-beta.2-debug.apk` from the release assets (or `dist/`).
+1. Download the matching APK for your device from the release assets:
+   - `McQueenVPN-v1.0.0-beta.4-arm64-v8a-release.apk` (recommended for 64-bit ARM phones/tablets)
+   - `McQueenVPN-v1.0.0-beta.4-armeabi-v7a-release.apk` (for 32-bit ARM Android 10+ devices)
+   - `McQueenVPN-v1.0.0-beta.4-universal-release.apk` (universal ARM fallback)
 2. Verify the SHA-256 checksum against `SHA256SUMS.txt`.
-3. Install on an Android 10+ device (enable installation from your browser or file manager if prompted, or install via `adb install McQueenVPN-v1.0.0-beta.2-debug.apk`).
+3. Install on an Android 10+ device (enable installation from your browser or file manager if prompted, or install via `adb install McQueenVPN-v1.0.0-beta.4-arm64-v8a-release.apk`).
 
 ---
 
@@ -63,10 +66,10 @@ McQueen VPN is a minimalist, user-friendly Android VPN built with Kotlin and Jet
 
 ---
 
-## Known Limitations (`1.0.0-beta.2`)
+## Known Limitations (`1.0.0-beta.4`)
 
-- **Pre-release Beta Status:** This is an active beta release (`v1.0.0-beta.2`). Broad physical-device compatibility across OEMs, carriers, and restrictive network environments is still being validated.
-- **Release Signing Keystore:** Release signing credentials are not committed to the public repository; `:app:assembleRelease` produces an unsigned APK, and pre-built beta APKs distributed from this branch are debug-signed (`debug.keystore`).
+- **Pre-release Beta Status:** This is an active beta release (`v1.0.0-beta.4`). Broad physical-device compatibility across OEMs, carriers, and restrictive network environments is still being validated.
+- **Release Signing Keystore:** Release signing credentials are kept outside the public repository in GitHub Actions secrets (`RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`); `:app:assembleRelease` and `:app:bundleRelease` fail fast if signing credentials are not provided.
 - **Background Manifest Sync Timing:** Periodic WorkManager synchronization is configured for 30-minute intervals, but exact execution timing is governed by Android battery optimizations and Doze mode.
 
 ---

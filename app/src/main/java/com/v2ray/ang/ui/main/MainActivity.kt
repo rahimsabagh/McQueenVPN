@@ -98,13 +98,29 @@ class MainActivity : BaseComponentActivity() {
             },
             onDismissBatteryOptimizationDialog = {
                 mcQueenViewModel.dismissBatteryOptimizationDialog()
-            }
+            },
+            onLocationsTabOpened = {
+                mcQueenViewModel.onLocationsTabOpened()
+            },
+            onLocationsTabClosed = {
+                mcQueenViewModel.onLocationsTabClosed()
+            },
         )
+    }
+
+    override fun onStart() {
+        super.onStart()
+        mcQueenViewModel.onHostStarted()
     }
 
     override fun onResume() {
         super.onResume()
         mcQueenViewModel.onHostResumed()
+    }
+
+    override fun onStop() {
+        mcQueenViewModel.onHostStopped()
+        super.onStop()
     }
 
     private fun startVpnWithPermissionCheck() {

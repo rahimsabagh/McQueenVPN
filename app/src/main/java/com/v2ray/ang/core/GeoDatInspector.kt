@@ -157,6 +157,9 @@ internal object GeoDatInspector {
                     hasEntry = true
                     ipv4Count += msgIpv4
                     ipv6Count += msgIpv6
+                    if (ipv4Count + ipv6Count > 0) {
+                        break
+                    }
                 }
             } else {
                 skipField(stream, wireType)
@@ -232,6 +235,9 @@ internal object GeoDatInspector {
                 if (codeMatched) {
                     hasEntry = true
                     domainCount += msgDomains
+                    if (domainCount > 0) {
+                        break
+                    }
                 }
             } else {
                 skipField(stream, wireType)

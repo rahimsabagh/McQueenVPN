@@ -2,6 +2,7 @@ package com.v2ray.ang.handler
 
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.dto.entities.WebDavConfig
+import com.v2ray.ang.util.HttpUtil
 import com.v2ray.ang.util.LogUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,11 +27,12 @@ object WebDavManager {
      */
     fun init(config: WebDavConfig) {
         cfg = config
-        client = OkHttpClient.Builder()
+        client = HttpUtil.baseClient().newBuilder()
             .connectTimeout(config.timeoutSeconds, TimeUnit.SECONDS)
             .readTimeout(config.timeoutSeconds, TimeUnit.SECONDS)
             .writeTimeout(config.timeoutSeconds, TimeUnit.SECONDS)
             .callTimeout(config.timeoutSeconds, TimeUnit.SECONDS)
+            .followSslRedirects(false)
             .build()
     }
 
@@ -67,14 +69,14 @@ object WebDavManager {
             cl.newCall(req).execute().use { resp ->
                 val success = resp.isSuccessful
                 if (success) {
-                    LogUtil.i(AppConfig.TAG, "WebDAV upload success: $remote")
+                    LogUtil.i(AppConfig.TAG, "WebDAV upload success: ${HttpUtil.redactUrlForLogging(remote)}")
                 } else {
-                    LogUtil.e(AppConfig.TAG, "WebDAV upload failed: $remote (HTTP ${resp.code})")
+                    LogUtil.e(AppConfig.TAG, "WebDAV upload failed: ${HttpUtil.redactUrlForLogging(remote)} (HTTP ${resp.code})")
                 }
                 return@withContext success
             }
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "WebDAV upload exception: $remote", e)
+            LogUtil.e(AppConfig.TAG, "WebDAV upload exception: ${HttpUtil.redactUrlForLogging(remote)}", e)
             return@withContext false
         }
     }
@@ -93,7 +95,7 @@ object WebDavManager {
             val req = applyAuth(Request.Builder().url(remote).get()).build()
             cl.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
-                    LogUtil.e(AppConfig.TAG, "WebDAV download failed: $remote (HTTP ${resp.code})")
+                    LogUtil.e(AppConfig.TAG, "WebDAV download failed: ${HttpUtil.redactUrlForLogging(remote)} (HTTP ${resp.code})")
                     return@withContext false
                 }
 
@@ -104,11 +106,11 @@ object WebDavManager {
                     }
                 }
 
-                LogUtil.i(AppConfig.TAG, "WebDAV download success: $remote")
+                LogUtil.i(AppConfig.TAG, "WebDAV download success: ${HttpUtil.redactUrlForLogging(remote)}")
                 return@withContext true
             }
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "WebDAV download exception: $remote", e)
+            LogUtil.e(AppConfig.TAG, "WebDAV download exception: ${HttpUtil.redactUrlForLogging(remote)}", e)
             return@withContext false
         }
     }
@@ -169,7 +171,7 @@ object WebDavManager {
                     cl.newCall(req).execute().use { resp ->
                         // 201 Created or 405 Method Not Allowed (already exists) are acceptable
                         if (resp.code != 201 && resp.code != 405 && resp.code != 409) {
-                            LogUtil.w(AppConfig.TAG, "WebDAV MKCOL $mkUrl returned ${resp.code}")
+                            LogUtil.w(AppConfig.TAG, "WebDAV MKCOL ${HttpUtil.redactUrlForLogging(mkUrl)} returned ${resp.code}")
                         }
                     }
                 } catch (_: Exception) {

@@ -48,6 +48,8 @@ class BootReceiver : BroadcastReceiver() {
             }
         }
 
+        SettingsManager.initApp(context)
+
         // Re-schedule background manifest & subscription updates even if auto-connect on boot is off.
         McQueenManifestUpdater.sync(context)
         SubscriptionUpdater.sync(context)

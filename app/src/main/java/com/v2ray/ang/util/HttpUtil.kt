@@ -4,7 +4,9 @@ import com.v2ray.ang.AppConfig
 import com.v2ray.ang.AppConfig.LOOPBACK
 import com.v2ray.ang.BuildConfig
 import com.v2ray.ang.dto.UrlContentRequest
+import okhttp3.ConnectionPool
 import okhttp3.Credentials
+import okhttp3.Dispatcher
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -18,9 +20,21 @@ import java.net.MalformedURLException
 import java.net.Proxy
 import java.net.URI
 import java.net.URL
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 object HttpUtil {
+
+    private val sharedConnectionPool = ConnectionPool(5, 5, TimeUnit.MINUTES)
+    private val sharedDispatcher = Dispatcher()
+    private val sharedBaseClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectionPool(sharedConnectionPool)
+            .dispatcher(sharedDispatcher)
+            .build()
+    }
+
+    internal fun baseClient(): OkHttpClient = sharedBaseClient
 
     /**
      * Converts the domain part of a URL string to its IDN (Punycode, ASCII Compatible Encoding) format.
@@ -116,20 +130,19 @@ object HttpUtil {
         val requestBuilder = Request.Builder()
             .url(url)
             .get()
-            .header("Connection", "close")
         if (request.httpPort != 0 && !request.proxyUsername.isNullOrBlank() && !request.proxyPassword.isNullOrBlank()) {
             requestBuilder.header("Proxy-Authorization", Credentials.basic(request.proxyUsername, request.proxyPassword))
         }
         try {
             client.newCall(requestBuilder.build()).execute().use { response ->
                 if (!response.isSuccessful) {
-                    LogUtil.w(AppConfig.TAG, "Failed to get URL content, code=${response.code}")
+                    logWarn("Failed to get URL content, code=${response.code}")
                     return null
                 }
                 return response.body?.string()
             }
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to get URL content", e)
+            logError("Failed to get URL content", e)
         }
         return null
     }
@@ -152,27 +165,30 @@ object HttpUtil {
         var currentUrl = request.url
         var redirects = 0
         val maxRedirects = 3
+        val client = if (currentUrl != null) {
+            buildOkHttpClient(request.timeout, request.httpPort, request.proxyUsername, request.proxyPassword, followRedirects = false)
+        } else {
+            null
+        }
+        val finalUserAgent = if (request.userAgent.isNullOrBlank()) {
+            "McQueenVPN/${BuildConfig.VERSION_NAME}"
+        } else {
+            request.userAgent
+        }
+        val activeHeaders = JsonUtil.parseHeadersToMap(request.requestHeaders).toMutableMap()
 
         while (redirects++ < maxRedirects) {
-            if (currentUrl == null) continue
-            val client = buildOkHttpClient(request.timeout, request.httpPort, request.proxyUsername, request.proxyPassword, followRedirects = false)
-            val finalUserAgent = if (request.userAgent.isNullOrBlank()) {
-                "McQueenVPN/${BuildConfig.VERSION_NAME}"
-            } else {
-                request.userAgent
-            }
+            val requestUrl = currentUrl ?: continue
+            val activeClient = requireNotNull(client)
             val requestBuilder = Request.Builder()
-                .url(currentUrl)
+                .url(requestUrl)
                 .get()
                 .header("User-agent", finalUserAgent)
-                .header("Connection", "close")
 
-            applyEmbeddedBasicAuthHeader(currentUrl, requestBuilder)
+            applyEmbeddedBasicAuthHeader(requestUrl, requestBuilder)
 
-
-            val headersMap = JsonUtil.parseHeadersToMap(request.requestHeaders)
-            for ((key, value) in headersMap) {
-                LogUtil.d(AppConfig.TAG, "Adding custom header: $key")
+            for ((key, value) in activeHeaders) {
+                logDebug("Adding custom header: $key")
                 try {
                     requestBuilder.header(key, value)
                 } catch (_: IllegalArgumentException) {
@@ -183,17 +199,18 @@ object HttpUtil {
                 requestBuilder.header("Proxy-Authorization", Credentials.basic(request.proxyUsername, request.proxyPassword))
             }
 
-            client.newCall(requestBuilder.build()).execute().use { response ->
+            activeClient.newCall(requestBuilder.build()).execute().use { response ->
                 when {
                     response.isRedirect -> {
                         val location = response.header("Location")
                         if (location.isNullOrEmpty()) {
                             throw IOException("Redirect location not found")
                         }
-                        currentUrl = resolveLocation(currentUrl, location)
-                        if (currentUrl.isNullOrEmpty()) {
-                            throw IOException("Failed to resolve redirect location")
+                        val (nextUrl, sameOrigin) = resolveAndValidateRedirect(requestUrl, location)
+                        if (!sameOrigin) {
+                            activeHeaders.clear()
                         }
+                        currentUrl = nextUrl
                         continue
                     }
 
@@ -211,6 +228,64 @@ object HttpUtil {
         throw IOException("Too many redirects")
     }
 
+    @Throws(IOException::class)
+    internal fun resolveAndValidateRedirect(currentUrl: String, location: String): Pair<String, Boolean> {
+        val nextUrl = resolveLocation(currentUrl, location)
+        if (nextUrl.isNullOrEmpty()) {
+            throw IOException("Failed to resolve redirect location")
+        }
+        val currentScheme = runCatching { URI(currentUrl).scheme?.lowercase(Locale.ROOT) }.getOrNull()
+        val nextScheme = runCatching { URI(nextUrl).scheme?.lowercase(Locale.ROOT) }.getOrNull()
+        if (nextScheme != "http" && nextScheme != "https") {
+            throw IOException("Blocked non-HTTP(S) redirect scheme")
+        }
+        if (currentScheme == "https" && nextScheme != "https") {
+            throw IOException("Blocked HTTPS downgrade redirect")
+        }
+        return nextUrl to isSameOrigin(currentUrl, nextUrl)
+    }
+
+    internal fun redactUrlForLogging(rawUrl: String?): String {
+        val trimmed = rawUrl?.trim().orEmpty()
+        if (trimmed.isEmpty()) return "<empty>"
+        return try {
+            val uri = URI(trimmed)
+            val scheme = uri.scheme?.lowercase(Locale.ROOT)
+            val host = uri.host
+            if (scheme.isNullOrBlank() || host.isNullOrBlank()) {
+                return "<redacted-url>"
+            }
+            val portPart = if (uri.port != -1) ":${uri.port}" else ""
+            val pathSuffix = if (!uri.rawPath.isNullOrEmpty() && uri.rawPath != "/") "/<redacted>" else ""
+            "$scheme://$host$portPart$pathSuffix"
+        } catch (_: Exception) {
+            "<redacted-url>"
+        }
+    }
+
+    private fun isSameOrigin(firstUrl: String, secondUrl: String): Boolean {
+        return try {
+            val a = URI(firstUrl)
+            val b = URI(secondUrl)
+            val schemeA = a.scheme?.lowercase(Locale.ROOT) ?: return false
+            val schemeB = b.scheme?.lowercase(Locale.ROOT) ?: return false
+            val hostA = a.host?.lowercase(Locale.ROOT) ?: return false
+            val hostB = b.host?.lowercase(Locale.ROOT) ?: return false
+            schemeA == schemeB && hostA == hostB && effectivePort(a, schemeA) == effectivePort(b, schemeB)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun effectivePort(uri: URI, normalizedScheme: String): Int {
+        if (uri.port != -1) return uri.port
+        return when (normalizedScheme) {
+            "https" -> 443
+            "http" -> 80
+            else -> -1
+        }
+    }
+
     private fun applyEmbeddedBasicAuthHeader(rawUrl: String, requestBuilder: Request.Builder) {
         val parsed = runCatching { URL(rawUrl) }.getOrNull() ?: return
         parsed.userInfo?.let { userInfo ->
@@ -225,18 +300,19 @@ object HttpUtil {
         }
     }
 
-    private fun buildOkHttpClient(
+    internal fun buildOkHttpClient(
         timeout: Int,
         httpPort: Int,
         proxyUsername: String?,
         proxyPassword: String?,
         followRedirects: Boolean
     ): OkHttpClient {
-        val builder = OkHttpClient.Builder()
+        val builder = sharedBaseClient.newBuilder()
             .connectTimeout(timeout.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(timeout.toLong(), TimeUnit.MILLISECONDS)
+            .writeTimeout(timeout.toLong(), TimeUnit.MILLISECONDS)
             .followRedirects(followRedirects)
-            .followSslRedirects(followRedirects)
+            .followSslRedirects(false)
 
         if (httpPort != 0) {
             builder.proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(LOOPBACK, httpPort)))
@@ -284,7 +360,6 @@ object HttpUtil {
         val requestBuilder = Request.Builder()
             .url(url)
             .get()
-            .header("Connection", "close")
         if (request.httpPort != 0 && !request.proxyUsername.isNullOrBlank() && !request.proxyPassword.isNullOrBlank()) {
             requestBuilder.header("Proxy-Authorization", Credentials.basic(request.proxyUsername, request.proxyPassword))
         }
@@ -292,7 +367,7 @@ object HttpUtil {
         return try {
             client.newCall(requestBuilder.build()).execute().use { response ->
                 if (!response.isSuccessful) {
-                    LogUtil.w(AppConfig.TAG, "Failed to download file, code=${response.code}, url=$url")
+                    logWarn("Failed to download file, code=${response.code}, url=${redactUrlForLogging(url)}")
                     return false
                 }
                 val body = response.body ?: return false
@@ -304,8 +379,20 @@ object HttpUtil {
                 true
             }
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to download file: $url", e)
+            logError("Failed to download file: ${redactUrlForLogging(url)}", e)
             false
         }
+    }
+
+    private fun logDebug(message: String) {
+        runCatching { LogUtil.d(AppConfig.TAG, message) }
+    }
+
+    private fun logWarn(message: String) {
+        runCatching { LogUtil.w(AppConfig.TAG, message) }
+    }
+
+    private fun logError(message: String, throwable: Throwable) {
+        runCatching { LogUtil.e(AppConfig.TAG, message, throwable) }
     }
 }

@@ -50,14 +50,16 @@ class QSTileService : TileService() {
     override fun onStartListening() {
         super.onStartListening()
 
-        if (CoreServiceManager.isRunning()) {
+        if (CoreServiceManager.isServiceRunning()) {
             setState(Tile.STATE_ACTIVE)
         } else {
             setState(Tile.STATE_INACTIVE)
         }
-        mMsgReceive = ReceiveMessageHandler(this)
+        unregisterMessageReceiverSafely()
+        val receiver = ReceiveMessageHandler(this)
+        mMsgReceive = receiver
         val mFilter = IntentFilter(AppConfig.BROADCAST_ACTION_ACTIVITY)
-        ContextCompat.registerReceiver(applicationContext, mMsgReceive, mFilter, Utils.receiverFlags())
+        ContextCompat.registerReceiver(applicationContext, receiver, mFilter, Utils.receiverFlags())
         MessageHelper.sendMsg2Service(this, AppConfig.MSG_REGISTER_CLIENT, "")
     }
 
@@ -66,14 +68,17 @@ class QSTileService : TileService() {
      */
     override fun onStopListening() {
         super.onStopListening()
+        unregisterMessageReceiverSafely()
+    }
 
+    private fun unregisterMessageReceiverSafely() {
+        val receiver = mMsgReceive ?: return
+        mMsgReceive = null
         try {
-            applicationContext.unregisterReceiver(mMsgReceive)
-            mMsgReceive = null
+            applicationContext.unregisterReceiver(receiver)
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to unregister receiver", e)
         }
-
     }
 
     /**

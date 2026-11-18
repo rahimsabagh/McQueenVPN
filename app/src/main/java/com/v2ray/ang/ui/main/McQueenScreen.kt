@@ -50,9 +50,11 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -114,7 +116,9 @@ fun McQueenScreen(
     onConfirmUpdateNow: () -> Unit,
     onDismissUpdateDialog: () -> Unit,
     onOpenBatteryOptimizationSettings: () -> Unit,
-    onDismissBatteryOptimizationDialog: () -> Unit
+    onDismissBatteryOptimizationDialog: () -> Unit,
+    onLocationsTabOpened: () -> Unit = {},
+    onLocationsTabClosed: () -> Unit = {},
 ) {
     var currentTab by rememberSaveable { mutableStateOf(McQueenNavTab.HOME) }
 
@@ -142,12 +146,30 @@ fun McQueenScreen(
         VpnConnectionState.DISCONNECTED,
         VpnConnectionState.FAILED -> Color.White.copy(alpha = if (isDark) 0.05f else 0.0f)
     }
-    val ambientGlowColor by animateColorAsState(
+    val ambientGlowColorState = animateColorAsState(
         targetValue = ambientGlowTarget,
         animationSpec = tween(durationMillis = 360),
         label = "home_ambient_glow"
     )
     val canvasBackground = MaterialTheme.colorScheme.background
+    val latestUiState = rememberUpdatedState(uiState)
+    val handlePrimaryConnectTap = remember(onToggleConnect) {
+        {
+            val snapshot = latestUiState.value
+            val state = snapshot.connectionState
+            val isIdleOrFailed = state == VpnConnectionState.DISCONNECTED ||
+                state == VpnConnectionState.FAILED
+            if (snapshot.selectedCountry == null && snapshot.countries.isEmpty() && isIdleOrFailed) {
+                currentTab = McQueenNavTab.LOCATIONS
+                onToggleConnect()
+            } else {
+                onToggleConnect()
+            }
+        }
+    }
+    val openLocations = remember { { currentTab = McQueenNavTab.LOCATIONS } }
+    val openSettings = remember { { currentTab = McQueenNavTab.SETTINGS } }
+    val goHome = remember { { currentTab = McQueenNavTab.HOME } }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -160,6 +182,7 @@ fun McQueenScreen(
                 .fillMaxSize()
                 .drawBehind {
                     drawRect(color = canvasBackground)
+                    val ambientGlowColor = ambientGlowColorState.value
                     if (ambientGlowColor.alpha > 0f && size.width > 0f && size.height > 0f) {
                         val center = Offset(size.width * 0.5f, size.height * 0.36f)
                         val radius = max(size.width * 0.85f, size.height * 0.45f)
@@ -177,18 +200,6 @@ fun McQueenScreen(
                 .padding(innerPadding),
             contentAlignment = Alignment.TopCenter
         ) {
-            val handlePrimaryConnectTap: () -> Unit = {
-                val state = uiState.connectionState
-                val isIdleOrFailed = state == VpnConnectionState.DISCONNECTED ||
-                    state == VpnConnectionState.FAILED
-                if (uiState.selectedCountry == null && uiState.countries.isEmpty() && isIdleOrFailed) {
-                    currentTab = McQueenNavTab.LOCATIONS
-                    onToggleConnect()
-                } else {
-                    onToggleConnect()
-                }
-            }
-
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -202,7 +213,7 @@ fun McQueenScreen(
                             isSyncing = uiState.isSyncingManifest,
                             isCheckingUpdate = uiState.appUpdateState is AppUpdateCheckResult.Checking,
                             onRefresh = onRefreshLocations,
-                            onOpenSettings = { currentTab = McQueenNavTab.SETTINGS },
+                            onOpenSettings = openSettings,
                             onCheckForUpdate = onCheckForUpdate
                         )
 
@@ -211,15 +222,22 @@ fun McQueenScreen(
                         UnifiedHomeLayout(
                             uiState = uiState,
                             onToggleConnect = handlePrimaryConnectTap,
-                            onOpenLocations = { currentTab = McQueenNavTab.LOCATIONS },
+                            onOpenLocations = openLocations,
                             modifier = Modifier.weight(1f)
                         )
                     }
 
                     McQueenNavTab.LOCATIONS -> {
+                        DisposableEffect(Unit) {
+                            onLocationsTabOpened()
+                            onDispose {
+                                onLocationsTabClosed()
+                            }
+                        }
+
                         McQueenSubScreenTopBar(
                             title = stringResource(R.string.mcqueen_section_countries),
-                            onBack = { currentTab = McQueenNavTab.HOME },
+                            onBack = goHome,
                             isSyncing = uiState.isSyncingManifest,
                             onRefresh = onRefreshLocations
                         )
@@ -244,7 +262,7 @@ fun McQueenScreen(
                     McQueenNavTab.SETTINGS -> {
                         McQueenSubScreenTopBar(
                             title = stringResource(R.string.mcqueen_nav_settings),
-                            onBack = { currentTab = McQueenNavTab.HOME }
+                            onBack = goHome
                         )
 
                         Spacer(modifier = Modifier.height(12.dp))

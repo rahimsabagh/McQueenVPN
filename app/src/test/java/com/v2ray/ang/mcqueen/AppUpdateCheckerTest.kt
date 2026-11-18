@@ -37,37 +37,52 @@ class AppUpdateCheckerTest {
     }
 
     @Test
-    fun `official github latest release endpoint and current build version match v1_0_0_beta_2 release`() {
+    fun `official github latest release endpoint and current build version match v1_0_0_beta_4 release`() {
         assertEquals(
             "https://api.github.com/repos/rahimsabagh/McQueenVPN/releases/latest",
             AppConfig.APP_LATEST_RELEASE_API_URL,
         )
-        assertTrue(com.v2ray.ang.BuildConfig.VERSION_NAME.isNotBlank())
+        assertEquals("1.0.0-beta.4", com.v2ray.ang.BuildConfig.VERSION_NAME)
         assertNotNull(
             SemanticVersion.parse(com.v2ray.ang.BuildConfig.VERSION_NAME),
             "Expected BuildConfig.VERSION_NAME '${com.v2ray.ang.BuildConfig.VERSION_NAME}' to be a valid semantic version",
         )
-        assertTrue(com.v2ray.ang.BuildConfig.VERSION_CODE >= 761)
+        assertEquals(764, com.v2ray.ang.BuildConfig.VERSION_CODE)
+        assertTrue(SemanticVersion.isNewer("1.0.0-beta.2", com.v2ray.ang.BuildConfig.VERSION_NAME)!!)
     }
 
     @Test
     fun `apk selector picks matching ABI or single universal release apk over HTTPS github domains`() {
         val multiAbiAssets = listOf(
             GitHubReleaseAsset(
-                name = "McQueenVPN-armeabi-v7a.apk",
-                downloadUrl = "https://github.com/rahimsabagh/McQueenVPN/releases/download/v1.0.0/McQueenVPN-armeabi-v7a.apk",
+                name = "McQueenVPN-v1.0.0-beta.4-armeabi-v7a-release.apk",
+                downloadUrl = "https://github.com/rahimsabagh/McQueenVPN/releases/download/v1.0.0-beta.4/McQueenVPN-v1.0.0-beta.4-armeabi-v7a-release.apk",
             ),
             GitHubReleaseAsset(
-                name = "McQueenVPN-arm64-v8a.apk",
-                downloadUrl = "https://github.com/rahimsabagh/McQueenVPN/releases/download/v1.0.0/McQueenVPN-arm64-v8a.apk",
+                name = "McQueenVPN-v1.0.0-beta.4-arm64-v8a-debug.apk",
+                downloadUrl = "https://github.com/rahimsabagh/McQueenVPN/releases/download/v1.0.0-beta.4/McQueenVPN-v1.0.0-beta.4-arm64-v8a-debug.apk",
             ),
             GitHubReleaseAsset(
-                name = "McQueenVPN-arm64-v8a.apk.sha256",
-                downloadUrl = "https://github.com/rahimsabagh/McQueenVPN/releases/download/v1.0.0/McQueenVPN-arm64-v8a.apk.sha256",
+                name = "McQueenVPN-v1.0.0-beta.4-arm64-v8a-release.apk",
+                downloadUrl = "https://github.com/rahimsabagh/McQueenVPN/releases/download/v1.0.0-beta.4/McQueenVPN-v1.0.0-beta.4-arm64-v8a-release.apk",
+            ),
+            GitHubReleaseAsset(
+                name = "McQueenVPN-v1.0.0-beta.4-universal-release.apk",
+                downloadUrl = "https://github.com/rahimsabagh/McQueenVPN/releases/download/v1.0.0-beta.4/McQueenVPN-v1.0.0-beta.4-universal-release.apk",
+            ),
+            GitHubReleaseAsset(
+                name = "SHA256SUMS.txt",
+                downloadUrl = "https://github.com/rahimsabagh/McQueenVPN/releases/download/v1.0.0-beta.4/SHA256SUMS.txt",
             ),
         )
         val pickedArm64 = GitHubReleaseParser.selectBestApkAsset(multiAbiAssets, listOf("arm64-v8a", "armeabi-v7a"))
-        assertEquals("McQueenVPN-arm64-v8a.apk", pickedArm64?.name)
+        assertEquals("McQueenVPN-v1.0.0-beta.4-arm64-v8a-release.apk", pickedArm64?.name)
+
+        val pickedArm32 = GitHubReleaseParser.selectBestApkAsset(multiAbiAssets, listOf("armeabi-v7a"))
+        assertEquals("McQueenVPN-v1.0.0-beta.4-armeabi-v7a-release.apk", pickedArm32?.name)
+
+        val pickedUniversalFallback = GitHubReleaseParser.selectBestApkAsset(multiAbiAssets, listOf("x86_64"))
+        assertEquals("McQueenVPN-v1.0.0-beta.4-universal-release.apk", pickedUniversalFallback?.name)
 
         // Single generic release APK (matches live rahimsabagh/McQueenVPN release asset naming)
         val singleReleaseAssets = listOf(

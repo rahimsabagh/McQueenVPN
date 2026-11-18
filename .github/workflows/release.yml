@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag (e.g. v1.0.0-beta.2)"
+        description: "Release tag (e.g. v1.0.0-beta.4)"
         required: false
-        default: "v1.0.0-beta.2"
+        default: "v1.0.0-beta.4"
         type: string
       publish_release:
-        description: "Publish/update GitHub Release with signed APK & AAB"
+        description: "Publish/update GitHub Release with signed APK & AAB (requires explicit authorization)"
         required: false
-        default: true
+        default: false
         type: boolean
 
 permissions:
@@ -23,12 +23,12 @@ concurrency:
 
 jobs:
   build:
-    name: Build signed Android App Bundle & APK
+    name: Build signed Android App Bundle & ABI APKs
     runs-on: ubuntu-latest
     env:
       GO_VERSION: "1.24"
       NDK_VERSION: "27.2.12479018"
-      RELEASE_TAG: ${{ inputs.release_tag || 'v1.0.0-beta.2' }}
+      RELEASE_TAG: ${{ inputs.release_tag || 'v1.0.0-beta.4' }}
 
     steps:
       - name: Checkout repository and submodules
@@ -59,7 +59,7 @@ jobs:
         if: hashFiles('aether/aether/Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi
 
       - name: Install Android SDK and NDK
         run: |
@@ -95,6 +95,7 @@ jobs:
         run: |
           umask 077
           printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$RUNNER_TEMP/release.jks"
+          chmod 600 "$RUNNER_TEMP/release.jks"
           test -s "$RUNNER_TEMP/release.jks"
 
       - name: Build native libraries from submodules if present
@@ -139,7 +140,7 @@ jobs:
           fileName: libv2ray.aar
           out-file-path: app/libs/
 
-      - name: Run unit tests & build signed Release AAB and APK
+      - name: Run unit tests & build signed Release AAB and ABI APKs
         env:
           RELEASE_STORE_FILE: ${{ runner.temp }}/release.jks
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || secrets.APP_KEYSTORE_PASSWORD }}
@@ -152,36 +153,61 @@ jobs:
             :app:bundleRelease \
             :app:assembleRelease
 
-      - name: Verify AAB & APK signatures, certificate, and native payload
+      - name: Clean up temporary release keystore
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: Verify AAB & APK signatures, certificate, 16 KB zipalign, package metadata, and native payload per ABI
         shell: bash
         run: |
           shopt -s nullglob
+          ZIPALIGN="$ANDROID_HOME/build-tools/36.0.0/zipalign"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          AAPT2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
+          expected_pkg="com.aistudio.mcqueenvpn.rmqvpn"
+          expected_vcode="764"
+          expected_vname="${RELEASE_TAG#v}"
+          expected_vname="${expected_vname#V}"
+
           aabs=(app/build/outputs/bundle/release/*.aab)
-          apks=(app/build/outputs/apk/release/*.apk)
           if (( ${#aabs[@]} != 1 )); then
             echo "::error::Expected exactly one Release AAB, found ${#aabs[@]}"
             exit 1
           fi
-          if (( ${#apks[@]} < 1 )); then
-            echo "::error::Expected signed Release APK in app/build/outputs/apk/release/"
+          aab="${aabs[0]}"
+          jarsigner -verify -verbose -certs "$aab"
+
+          expected_sha256="761BA39200F977B1AFE71C6ADDFDFB567EF1D7913E1BBB724A6EC4670A5521FD"
+          actual_sha256="$(keytool -printcert -jarfile "$aab" | awk -F': ' '/SHA256:/ {gsub(":", "", $2); print toupper($2); exit}')"
+          if [[ -z "$actual_sha256" ]]; then
+            echo "::error::Unable to extract SHA-256 certificate fingerprint from $aab"
             exit 1
           fi
-
-          aab="${aabs[0]}"
-          apk="${apks[0]}"
-          jarsigner -verify "$aab"
-          jarsigner -verify "$apk"
-
-          actual_sha256="$(keytool -printcert -jarfile "$aab" | awk -F': ' '/SHA256:/ {gsub(":", "", $2); print toupper($2); exit}')"
-          expected_sha256="761BA39200F977B1AFE71C6ADDFDFB567EF1D7913E1BBB724A6EC4670A5521FD"
+          echo "Release signing certificate SHA-256: $actual_sha256" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$actual_sha256" != "$expected_sha256" ]]; then
             echo "::warning::Signing certificate SHA-256 ($actual_sha256) differs from Play Console upload certificate ($expected_sha256)."
           fi
 
-          entries="$(unzip -Z1 "$aab")"
-          for abi in arm64-v8a armeabi-v7a x86_64; do
-            for library in libaether.so libpsiphon-tunnel-core.so liblyrebird.so; do
-              grep -Fqx "base/lib/$abi/$library" <<< "$entries" || {
+          required_libs=(
+            libaether.so
+            libgojni.so
+            libpsiphon-tunnel-core.so
+            liblyrebird.so
+            libhev-socks5-tunnel.so
+            libhevsockstun.so
+            libmmkv.so
+            libandroidx.graphics.path.so
+          )
+
+          aab_entries="$(unzip -Z1 "$aab")"
+          if echo "$aab_entries" | grep -qE '^base/lib/(x86|x86_64)/'; then
+            echo "::error::AAB contains excluded non-ARM ABI entries"
+            exit 1
+          fi
+          for abi in arm64-v8a armeabi-v7a; do
+            for library in "${required_libs[@]}"; do
+              grep -Fqx "base/lib/$abi/$library" <<< "$aab_entries" || {
                 echo "::error::AAB is missing base/lib/$abi/$library"
                 exit 1
               }
@@ -189,9 +215,56 @@ jobs:
           done
 
           mkdir -p release-dist
-          cp "$aab" "release-dist/McQueenVPN-${RELEASE_TAG}.aab"
-          cp "$apk" "release-dist/app-release.apk"
-          cp "$apk" "release-dist/McQueenVPN-${RELEASE_TAG}.apk"
+          cp "$aab" "release-dist/McQueenVPN-${RELEASE_TAG}-release.aab"
+
+          for split in arm64-v8a armeabi-v7a universal; do
+            apk="app/build/outputs/apk/release/app-${split}-release.apk"
+            if [[ ! -f "$apk" ]]; then
+              echo "::error::Expected signed release split APK missing: $apk"
+              exit 1
+            fi
+            "$ZIPALIGN" -c -P 16 -v 4 "$apk" >/dev/null
+            "$APKSIGNER" verify --verbose --print-certs "$apk"
+            jarsigner -verify -verbose -certs "$apk"
+            apk_sha256="$(keytool -printcert -jarfile "$apk" | awk -F': ' '/SHA256:/ {gsub(":", "", $2); print toupper($2); exit}')"
+            if [[ "$apk_sha256" != "$actual_sha256" ]]; then
+              echo "::error::Signing certificate mismatch between $apk ($apk_sha256) and AAB ($actual_sha256)"
+              exit 1
+            fi
+            badging="$("$AAPT2" dump badging "$apk" | head -n 1)"
+            echo "$badging" | grep -Fq "name='${expected_pkg}'" || {
+              echo "::error::$apk has unexpected package name: $badging"
+              exit 1
+            }
+            echo "$badging" | grep -Fq "versionCode='${expected_vcode}'" || {
+              echo "::error::$apk has unexpected versionCode: $badging"
+              exit 1
+            }
+            echo "$badging" | grep -Fq "versionName='${expected_vname}'" || {
+              echo "::error::$apk has unexpected versionName: $badging"
+              exit 1
+            }
+            apk_entries="$(unzip -Z1 "$apk")"
+            if echo "$apk_entries" | grep -qE '^lib/(x86|x86_64)/'; then
+              echo "::error::$apk contains excluded non-ARM ABI entries"
+              exit 1
+            fi
+            if [[ "$split" == "universal" ]]; then
+              check_abis=(arm64-v8a armeabi-v7a)
+            else
+              check_abis=("$split")
+            fi
+            for abi in "${check_abis[@]}"; do
+              for library in "${required_libs[@]}"; do
+                grep -Fqx "lib/$abi/$library" <<< "$apk_entries" || {
+                  echo "::error::$apk is missing lib/$abi/$library"
+                  exit 1
+                }
+              done
+            done
+            cp "$apk" "release-dist/McQueenVPN-${RELEASE_TAG}-${split}-release.apk"
+          done
+
           (
             cd release-dist
             sha256sum *.aab *.apk | tee SHA256SUMS.txt
@@ -206,7 +279,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload signed Release APK
+      - name: Upload signed Release APKs
         uses: actions/upload-artifact@v4
         with:
           name: McQueenVPN-release-APK
@@ -231,7 +304,8 @@ jobs:
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           generate_release_notes: true
           files: |
-            release-dist/app-release.apk
-            release-dist/McQueenVPN-${{ env.RELEASE_TAG }}.apk
-            release-dist/McQueenVPN-${{ env.RELEASE_TAG }}.aab
+            release-dist/McQueenVPN-${{ env.RELEASE_TAG }}-release.aab
+            release-dist/McQueenVPN-${{ env.RELEASE_TAG }}-arm64-v8a-release.apk
+            release-dist/McQueenVPN-${{ env.RELEASE_TAG }}-armeabi-v7a-release.apk
+            release-dist/McQueenVPN-${{ env.RELEASE_TAG }}-universal-release.apk
             release-dist/SHA256SUMS.txt

@@ -24,6 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -40,34 +41,49 @@ object NotificationManager {
     private val trafficTracker = VpnTrafficTracker(
         source = { CoreServiceManager.getAllOutboundTraffic() }
     )
+    private val speedController = SpeedNotificationController(
+        scope = notificationScope,
+        trafficTracker = trafficTracker,
+        isServiceRunning = { CoreServiceManager.isServiceRunning() },
+        sessionStartMs = { CoreServiceManager.getSessionStartTimeMs() },
+        isSpeedNotificationEnabled = {
+            MmkvManager.decodeSettingsBool(
+                AppConfig.PREF_SPEED_ENABLED,
+                AppConfig.DEFAULT_SPEED_ENABLED
+            )
+        },
+        onEmitTrafficStats = { snapshot ->
+            getService()?.let { service ->
+                MessageHelper.sendMsg2UI(
+                    service,
+                    AppConfig.MSG_TRAFFIC_STATS,
+                    snapshot
+                )
+            }
+        },
+        onUpdateNotification = { contentText, proxyTraffic, directTraffic ->
+            updateNotification(contentText, proxyTraffic, directTraffic)
+        },
+    )
 
-    private var speedNotificationJob: Job? = null
+    private val builderLock = Any()
     private var mBuilder: NotificationCompat.Builder? = null
-    @Volatile
-    private var isScreenInteractive: Boolean = true
-    @Volatile
-    private var lastNotifiedText: String? = null
     private var mNotificationManager: android.app.NotificationManager? = null
 
-    fun onSessionStart(sessionStartMs: Long) {
-        lastNotifiedText = null
-        trafficTracker.onSessionStart(sessionStartMs)
+    fun onSessionStart(sessionStartMs: Long, isInteractive: Boolean = true) {
+        speedController.onSessionStart(sessionStartMs, isInteractive)
     }
 
     fun onCoreReloaded() {
-        trafficTracker.onCoreReloaded()
+        speedController.onCoreReloaded()
     }
 
     fun onScreenOff() {
-        isScreenInteractive = false
+        speedController.onScreenOff()
     }
 
-    fun onScreenOn() {
-        isScreenInteractive = true
-        lastNotifiedText = null
-        val service = getService() ?: return
-        val snapshot = trafficTracker.currentSnapshot(CoreServiceManager.getSessionStartTimeMs())
-        MessageHelper.sendMsg2UI(service, AppConfig.MSG_TRAFFIC_STATS, snapshot)
+    fun onScreenOn(currentConfig: ProfileItem? = null) {
+        speedController.onScreenOn(outboundLabelOrNull(currentConfig))
     }
 
     fun currentTrafficSnapshot(sessionStartMs: Long = CoreServiceManager.getSessionStartTimeMs()): TrafficStatsSnapshot {
@@ -82,63 +98,16 @@ object NotificationManager {
     }
 
     /**
-     * Starts the speed notification and live traffic counter polling loop.
-     * Synchronized to guarantee at most one active polling coroutine at any time.
+     * Starts the speed notification and live traffic counter polling loop when interactive.
+     * Lifecycle-safe synchronization ensures at most one active polling coroutine at any time.
      */
-    @Synchronized
     fun startSpeedNotification(currentConfig: ProfileItem?) {
-        if (speedNotificationJob?.isActive == true || !CoreServiceManager.isServiceRunning()) return
+        val outboundLabel = outboundLabelOrNull(currentConfig) ?: AppConfig.TAG_PROXY
+        speedController.startSpeedNotification(outboundLabel)
+    }
 
-        val outboundLabel = currentConfig?.remarks?.takeIf { it.isNotBlank() } ?: AppConfig.TAG_PROXY
-
-        speedNotificationJob = notificationScope.launch {
-            while (isActive && CoreServiceManager.isServiceRunning()) {
-                val sessionStartMs = CoreServiceManager.getSessionStartTimeMs()
-                val sampleResult = trafficTracker.sample(sessionStartMs)
-
-                getService()?.let { service ->
-                    MessageHelper.sendMsg2UI(
-                        service,
-                        AppConfig.MSG_TRAFFIC_STATS,
-                        sampleResult.snapshot
-                    )
-                }
-
-                val speedNotificationEnabled = MmkvManager.decodeSettingsBool(
-                    AppConfig.PREF_SPEED_ENABLED,
-                    AppConfig.DEFAULT_SPEED_ENABLED
-                )
-                if (isScreenInteractive && speedNotificationEnabled) {
-                    val text = StringBuilder()
-                    text.append(
-                        "• $outboundLabel ↑ ${sampleResult.proxyUplinkBps.toSpeedString()} ↓ ${sampleResult.proxyDownlinkBps.toSpeedString()}\n"
-                    )
-                    val directUp = sampleResult.directUplinkBps
-                    val directDown = sampleResult.directDownlinkBps
-                    if (directUp > 0L || directDown > 0L) {
-                        text.append("• ${AppConfig.TAG_DIRECT} ↑ ${directUp.toSpeedString()} ↓ ${directDown.toSpeedString()}\n")
-                    }
-                    val totalBytes = sampleResult.snapshot.sessionTotalBytes
-                    if (totalBytes > 0L) {
-                        text.append(
-                            "↑ ${sampleResult.snapshot.sessionUplinkBytes.toTrafficString()}  ↓ ${sampleResult.snapshot.sessionDownlinkBytes.toTrafficString()}"
-                        )
-                    }
-
-                    val renderedText = text.toString().trim()
-                    if (renderedText != lastNotifiedText) {
-                        lastNotifiedText = renderedText
-                        updateNotification(
-                            renderedText,
-                            sampleResult.proxyUplinkBps,
-                            sampleResult.proxyDownlinkBps
-                        )
-                    }
-                }
-
-                delay(SPEED_UPDATE_INTERVAL_MS)
-            }
-        }
+    private fun outboundLabelOrNull(currentConfig: ProfileItem?): String? {
+        return currentConfig?.remarks?.takeIf { it.isNotBlank() }
     }
 
     /**
@@ -193,8 +162,10 @@ object NotificationManager {
                 restartV2RayPendingIntent
             )
 
-        mBuilder = builder
-        lastNotifiedText = null
+        synchronized(builderLock) {
+            mBuilder = builder
+        }
+        speedController.resetNotificationTextCache()
         val notification = builder.build()
         val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
@@ -210,20 +181,19 @@ object NotificationManager {
     @Synchronized
     fun cancelNotification(explicitService: Service? = null) {
         val service = explicitService ?: getService()
-        mBuilder = null
-        lastNotifiedText = null
-        stopSpeedNotification()
-        trafficTracker.onSessionStop()
-
-        if (service != null) {
-            runCatching {
-                ServiceCompat.stopForeground(service, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        synchronized(builderLock) {
+            mBuilder = null
+            speedController.stopSessionStats()
+            if (service != null) {
+                runCatching {
+                    ServiceCompat.stopForeground(service, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                }
+                runCatching {
+                    getNotificationManager(service)?.cancel(NOTIFICATION_ID)
+                }
             }
-            runCatching {
-                getNotificationManager(service)?.cancel(NOTIFICATION_ID)
-            }
+            mNotificationManager = null
         }
-        mNotificationManager = null
     }
 
     /**
@@ -231,8 +201,7 @@ object NotificationManager {
      */
     @Synchronized
     fun stopSessionStats() {
-        stopSpeedNotification()
-        trafficTracker.onSessionStop()
+        speedController.stopSessionStats()
     }
 
     /**
@@ -240,12 +209,7 @@ object NotificationManager {
      */
     @Synchronized
     fun stopSpeedNotification() {
-        speedNotificationJob?.let {
-            it.cancel()
-            speedNotificationJob = null
-            lastNotifiedText = null
-            updateNotification(null, 0, 0)
-        }
+        speedController.stopSpeedNotification()
     }
 
     private fun createNotificationChannel(service: Service): String {
@@ -263,12 +227,16 @@ object NotificationManager {
     }
 
     private fun updateNotification(contentText: String?, proxyTraffic: Long, directTraffic: Long) {
-        val builder = mBuilder ?: return
-        builder.setSmallIcon(R.drawable.ic_stat_mcqueen)
-        builder.setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
-        builder.setContentText(contentText)
-        runCatching {
-            getNotificationManager()?.notify(NOTIFICATION_ID, builder.build())
+        synchronized(builderLock) {
+            val builder = mBuilder ?: return
+            if (!speedController.isSessionActiveState()) return
+            builder.setSmallIcon(R.drawable.ic_stat_mcqueen)
+            builder.setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
+            builder.setContentText(contentText)
+            val notification = builder.build()
+            runCatching {
+                getNotificationManager()?.notify(NOTIFICATION_ID, notification)
+            }
         }
     }
 
@@ -282,5 +250,226 @@ object NotificationManager {
             mNotificationManager = service.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
         }
         return mNotificationManager
+    }
+}
+
+internal class SpeedNotificationController(
+    private val scope: CoroutineScope,
+    private val trafficTracker: VpnTrafficTracker,
+    private val isServiceRunning: () -> Boolean,
+    private val sessionStartMs: () -> Long,
+    private val isSpeedNotificationEnabled: () -> Boolean,
+    private val onEmitTrafficStats: (TrafficStatsSnapshot) -> Unit,
+    private val onUpdateNotification: (contentText: String?, proxyTraffic: Long, directTraffic: Long) -> Unit,
+    private val pollIntervalMs: Long = DEFAULT_POLL_INTERVAL_MS,
+) {
+    private val lock = Any()
+
+    private var pollingJob: Job? = null
+    private var pollingGeneration: Long = 0L
+    private var isSessionActive: Boolean = false
+    private var isScreenInteractive: Boolean = true
+    private var outboundLabel: String = AppConfig.TAG_PROXY
+    private var lastNotifiedText: String? = null
+    private var hasNotificationContent: Boolean = false
+
+    fun onSessionStart(sessionStartMs: Long, isInteractive: Boolean = true) {
+        synchronized(lock) {
+            cancelPollingLocked(clearNotificationContent = true)
+            isSessionActive = true
+            isScreenInteractive = isInteractive
+            trafficTracker.onSessionStart(sessionStartMs)
+        }
+    }
+
+    fun onCoreReloaded() {
+        trafficTracker.onCoreReloaded()
+    }
+
+    fun resetNotificationTextCache() {
+        synchronized(lock) {
+            lastNotifiedText = null
+            hasNotificationContent = false
+        }
+    }
+
+    fun startSpeedNotification(outboundLabel: String) {
+        synchronized(lock) {
+            this.outboundLabel = outboundLabel.ifBlank { AppConfig.TAG_PROXY }
+            isSessionActive = true
+            ensurePollingLocked()
+        }
+    }
+
+    fun onScreenOff() {
+        synchronized(lock) {
+            if (!isScreenInteractive && pollingJob == null) {
+                lastNotifiedText = null
+                return
+            }
+            isScreenInteractive = false
+            cancelPollingLocked(clearNotificationContent = false)
+        }
+    }
+
+    fun onScreenOn(outboundLabel: String? = null) {
+        synchronized(lock) {
+            if (!outboundLabel.isNullOrBlank()) {
+                this.outboundLabel = outboundLabel
+            }
+            val wasInteractive = isScreenInteractive
+            isScreenInteractive = true
+            if (!wasInteractive) {
+                lastNotifiedText = null
+            }
+            ensurePollingLocked()
+        }
+    }
+
+    fun stopSpeedNotification() {
+        val shouldClearNotification: Boolean
+        synchronized(lock) {
+            shouldClearNotification = pollingJob != null || hasNotificationContent || lastNotifiedText != null
+            cancelPollingLocked(clearNotificationContent = true)
+        }
+        if (shouldClearNotification) {
+            onUpdateNotification(null, 0L, 0L)
+        }
+    }
+
+    fun stopSessionStats() {
+        val shouldClearNotification: Boolean
+        synchronized(lock) {
+            shouldClearNotification = pollingJob != null || hasNotificationContent || lastNotifiedText != null
+            isSessionActive = false
+            outboundLabel = AppConfig.TAG_PROXY
+            cancelPollingLocked(clearNotificationContent = true)
+            trafficTracker.onSessionStop()
+        }
+        if (shouldClearNotification) {
+            onUpdateNotification(null, 0L, 0L)
+        }
+    }
+
+    internal fun isPollingActive(): Boolean = synchronized(lock) {
+        pollingJob?.isActive == true
+    }
+
+    internal fun isSessionActiveState(): Boolean = synchronized(lock) {
+        isSessionActive
+    }
+
+    internal fun isInteractiveState(): Boolean = synchronized(lock) {
+        isScreenInteractive
+    }
+
+    private fun ensurePollingLocked() {
+        if (!isSessionActive || !isScreenInteractive || !isServiceRunning()) {
+            return
+        }
+        if (pollingJob?.isActive == true) {
+            return
+        }
+        val gen = ++pollingGeneration
+        pollingJob = scope.launch {
+            runPollingLoop(gen)
+        }
+    }
+
+    private fun cancelPollingLocked(clearNotificationContent: Boolean) {
+        pollingGeneration++
+        pollingJob?.cancel()
+        pollingJob = null
+        lastNotifiedText = null
+        if (clearNotificationContent) {
+            hasNotificationContent = false
+        }
+    }
+
+    private fun shouldPollLocked(expectedGen: Long): Boolean =
+        isSessionActive &&
+            isScreenInteractive &&
+            pollingGeneration == expectedGen &&
+            isServiceRunning()
+
+    private suspend fun runPollingLoop(expectedGen: Long) {
+        while (currentCoroutineContext().isActive) {
+            val activeLabel = synchronized(lock) {
+                if (!shouldPollLocked(expectedGen)) return
+                outboundLabel
+            }
+
+            val sampleResult = trafficTracker.sample(sessionStartMs())
+
+            val canEmit = synchronized(lock) {
+                shouldPollLocked(expectedGen)
+            }
+            if (!canEmit || !currentCoroutineContext().isActive) {
+                break
+            }
+
+            onEmitTrafficStats(sampleResult.snapshot)
+
+            if (isSpeedNotificationEnabled()) {
+                val renderedText = formatNotificationText(activeLabel, sampleResult)
+                val shouldNotify = synchronized(lock) {
+                    if (!shouldPollLocked(expectedGen) || renderedText == lastNotifiedText) {
+                        false
+                    } else {
+                        lastNotifiedText = renderedText
+                        hasNotificationContent = true
+                        true
+                    }
+                }
+                if (shouldNotify) {
+                    onUpdateNotification(
+                        renderedText,
+                        sampleResult.proxyUplinkBps,
+                        sampleResult.proxyDownlinkBps
+                    )
+                }
+            } else {
+                val shouldClear = synchronized(lock) {
+                    if (shouldPollLocked(expectedGen) && (hasNotificationContent || lastNotifiedText != null)) {
+                        lastNotifiedText = null
+                        hasNotificationContent = false
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (shouldClear) {
+                    onUpdateNotification(null, 0L, 0L)
+                }
+            }
+
+            delay(pollIntervalMs)
+        }
+    }
+
+    companion object {
+        private const val DEFAULT_POLL_INTERVAL_MS = 1000L
+
+        internal fun formatNotificationText(
+            outboundLabel: String,
+            sampleResult: TrafficSampleResult,
+        ): String {
+            val text = StringBuilder()
+            text.append(
+                "• $outboundLabel ↑ ${sampleResult.proxyUplinkBps.toSpeedString()} ↓ ${sampleResult.proxyDownlinkBps.toSpeedString()}\n"
+            )
+            val directUp = sampleResult.directUplinkBps
+            val directDown = sampleResult.directDownlinkBps
+            if (directUp > 0L || directDown > 0L) {
+                text.append("• ${AppConfig.TAG_DIRECT} ↑ ${directUp.toSpeedString()} ↓ ${directDown.toSpeedString()}\n")
+            }
+            val totalBytes = sampleResult.snapshot.sessionTotalBytes
+            if (totalBytes > 0L) {
+                text.append(
+                    "↑ ${sampleResult.snapshot.sessionUplinkBytes.toTrafficString()}  ↓ ${sampleResult.snapshot.sessionDownlinkBytes.toTrafficString()}"
+                )
+            }
+            return text.toString().trim()
+        }
     }
 }

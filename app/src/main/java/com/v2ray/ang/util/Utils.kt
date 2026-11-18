@@ -425,20 +425,31 @@ object Utils {
         try {
             if (URLUtil.isHttpsUrl(value)) return true
             if (URLUtil.isHttpUrl(value)) {
-                if (value.contains(LOOPBACK)) return true
-
-                //Check private ip address
-                val uri = URI(fixIllegalUrl(value))
-                if (isIpAddress(uri.host)) {
-                    AppConfig.PRIVATE_IP_LIST.forEach {
-                        if (isIpInCidr(uri.host, it)) return true
-                    }
-                }
+                return isLoopbackOrPrivateHttpUrl(value)
             }
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to validate subscription URL", e)
         }
         return false
+    }
+
+    internal fun isLoopbackOrPrivateHttpUrl(value: String?): Boolean {
+        if (value.isNullOrBlank()) return false
+        return try {
+            val uri = URI(fixIllegalUrl(value.trim()))
+            if (!uri.scheme.equals("http", ignoreCase = true)) return false
+            val rawHost = uri.host?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+            val host = rawHost.removePrefix("[").removeSuffix("]").lowercase(Locale.ROOT)
+            if (host == LOOPBACK || host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1") {
+                return true
+            }
+            if (isIpAddress(host)) {
+                return AppConfig.PRIVATE_IP_LIST.any { cidr -> isIpInCidr(host, cidr) }
+            }
+            false
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /**

@@ -7,6 +7,7 @@ import android.os.Build
 import com.google.gson.JsonParser
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.BuildConfig
+import com.v2ray.ang.util.HttpUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -225,24 +226,27 @@ object GitHubReleaseParser {
         }
         if (validApks.isEmpty()) return null
 
+        val nonDebugApks = validApks.filterNot { it.name.lowercase(Locale.US).contains("debug") }
+        val candidatePool = nonDebugApks.ifEmpty { validApks }
+
         // 1. Match highest-priority device ABI if ABI-specific APKs are attached
         val normalizedAbis = supportedAbis.map { it.trim().lowercase(Locale.US) }.filter { it.isNotEmpty() }
         for (abi in normalizedAbis) {
-            val matched = validApks.firstOrNull { asset ->
+            val matched = candidatePool.firstOrNull { asset ->
                 matchesAbiToken(asset.name.lowercase(Locale.US), abi)
             }
             if (matched != null) return matched
         }
 
         // 2. Fallback to explicit universal APK
-        val universal = validApks.firstOrNull { asset ->
+        val universal = candidatePool.firstOrNull { asset ->
             asset.name.lowercase(Locale.US).contains("universal")
         }
         if (universal != null) return universal
 
         // 3. Fallback to generic single/release APK that is NOT tagged for a different ABI
         val knownAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
-        val genericReleaseApk = validApks.firstOrNull { asset ->
+        val genericReleaseApk = candidatePool.firstOrNull { asset ->
             val lower = asset.name.lowercase(Locale.US)
             knownAbis.none { token -> matchesAbiToken(lower, token) }
         }
@@ -359,7 +363,7 @@ object AppUpdateApkVerifier {
 }
 
 class AppUpdateChecker(
-    private val httpClient: OkHttpClient = defaultHttpClient(),
+    private val httpClient: OkHttpClient = sharedDefaultHttpClient,
     private val endpointUrl: String = AppConfig.APP_LATEST_RELEASE_API_URL,
 ) {
     suspend fun checkLatestRelease(
@@ -451,8 +455,10 @@ class AppUpdateChecker(
     }
 
     companion object {
+        private val sharedDefaultHttpClient: OkHttpClient by lazy { defaultHttpClient() }
+
         fun defaultHttpClient(): OkHttpClient {
-            return OkHttpClient.Builder()
+            return HttpUtil.baseClient().newBuilder()
                 .connectTimeout(12, TimeUnit.SECONDS)
                 .readTimeout(12, TimeUnit.SECONDS)
                 .callTimeout(20, TimeUnit.SECONDS)

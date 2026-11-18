@@ -100,17 +100,66 @@ object BypassIranRoutingHelper {
         )
     }
 
+    private data class GeoDataFingerprint(
+        val dirPath: String,
+        val geoipLength: Long,
+        val geoipLastModified: Long,
+        val geositeLength: Long,
+        val geositeLastModified: Long,
+    )
+
+    @Volatile
+    private var cachedGeoInspection: Pair<GeoDataFingerprint, GeoDataStatus>? = null
+    private val geoInspectionLock = Any()
+
     fun inspectGeoData(assetDir: File): GeoDataStatus {
-        val sanitizer = GeoAssetSanitizer.forDirectory(assetDir)
-        return GeoDataStatus(
-            hasGeoipDat = sanitizer.hasGeoipDat,
-            hasGeositeDat = sanitizer.hasGeositeDat,
-            hasGeoipIr = sanitizer.canUseGeoipIr(),
-            hasGeositeCategoryIr = sanitizer.canUseGeositeCategoryIr(),
-            ipv4CidrCount = sanitizer.geoipIrIpv4Count,
-            ipv6CidrCount = sanitizer.geoipIrIpv6Count,
-            irDomainCount = sanitizer.geositeCategoryIrDomainCount,
+        val geoipFile = File(assetDir, AppConfig.GEOIP_DAT)
+        val geositeFile = File(assetDir, AppConfig.GEOSITE_DAT)
+        val fingerprint = GeoDataFingerprint(
+            dirPath = assetDir.absolutePath,
+            geoipLength = if (geoipFile.isFile) geoipFile.length() else -1L,
+            geoipLastModified = if (geoipFile.isFile) geoipFile.lastModified() else -1L,
+            geositeLength = if (geositeFile.isFile) geositeFile.length() else -1L,
+            geositeLastModified = if (geositeFile.isFile) geositeFile.lastModified() else -1L,
         )
+        cachedGeoInspection?.let { (cachedFp, cachedStatus) ->
+            if (cachedFp == fingerprint) return cachedStatus
+        }
+
+        return synchronized(geoInspectionLock) {
+            cachedGeoInspection?.let { (cachedFp, cachedStatus) ->
+                if (cachedFp == fingerprint) return@synchronized cachedStatus
+            }
+            val sanitizer = GeoAssetSanitizer.forDirectory(assetDir)
+            val status = GeoDataStatus(
+                hasGeoipDat = sanitizer.hasGeoipDat,
+                hasGeositeDat = sanitizer.hasGeositeDat,
+                hasGeoipIr = sanitizer.canUseGeoipIr(),
+                hasGeositeCategoryIr = sanitizer.canUseGeositeCategoryIr(),
+                ipv4CidrCount = sanitizer.geoipIrIpv4Count,
+                ipv6CidrCount = sanitizer.geoipIrIpv6Count,
+                irDomainCount = sanitizer.geositeCategoryIrDomainCount,
+            )
+            cachedGeoInspection = fingerprint to status
+            status
+        }
+    }
+
+    internal fun selectCompatibilityGuid(
+        activeGuid: String?,
+        countryProfiles: List<Pair<String, ProfileItem>>,
+        fallbackSelectGuid: String?,
+    ): String? {
+        if (!activeGuid.isNullOrBlank()) {
+            return activeGuid
+        }
+        if (countryProfiles.isNotEmpty()) {
+            val supportedCandidate = countryProfiles.firstOrNull { (_, profile) ->
+                profile.configType != EConfigType.CUSTOM
+            }
+            return (supportedCandidate ?: countryProfiles.first()).first
+        }
+        return fallbackSelectGuid
     }
 
     fun checkCompatibility(

@@ -30,6 +30,11 @@ import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.io.RandomAccessFile
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.UUID
 import kotlin.random.Random
 
@@ -37,14 +42,25 @@ object SettingsManager {
 
     @Volatile
     private var runtimeSocksPort: Int? = null
+    @Volatile
+    private var appInitialized: Boolean = false
+    private val initAppLock = Any()
+    @Volatile
+    private var assetsVerified: Boolean = false
+    private val initAssetsLock = Any()
 
     fun initApp(context: Context) {
-        ensureDefaultSettings()
-        //ensureDefaultSubscription()
-        initRoutingRulesets(context)
-        migrateServerListToSubscriptions()
-        migrateHysteria2PinSHA256()
-        migrateProxyChainProfileList()
+        if (appInitialized) return
+        synchronized(initAppLock) {
+            if (appInitialized) return
+            ensureDefaultSettings()
+            //ensureDefaultSubscription()
+            initRoutingRulesets(context)
+            migrateServerListToSubscriptions()
+            migrateHysteria2PinSHA256()
+            migrateProxyChainProfileList()
+            appInitialized = true
+        }
     }
 
     /**
@@ -421,40 +437,129 @@ object SettingsManager {
      */
     fun initAssets(context: Context, assets: AssetManager) {
         val extFolder = Utils.userAssetPath(context)
-
-        try {
-            val geo = arrayOf(AppConfig.GEOSITE_DAT, AppConfig.GEOIP_DAT, AppConfig.GEOIP_ONLY_CN_PRIVATE_DAT)
-            // The bundled Psiphon list is the newest the build could fetch. It goes over the copy only when it
-            // was published after the copy was made, never over a file the user picked, and the copy takes the
-            // list's publication time so that the next build is compared with the list, not with the copy.
-            val publishedAt = PsiphonServerList.publishedAt(
-                runCatching { assets.open(AppConfig.PSIPHON_SERVERS_STAMP).use { it.bufferedReader().readText() } }.getOrNull()
-            )
-            // "file" is the address the Asset files screen saves for a file the user picked.
-            val keptByUser = MmkvManager.decodeAssetUrls().any { it.assetUrl.remarks == AppConfig.PSIPHON_SERVERS_DAT && it.assetUrl.url == "file" }
-            assets.list("")
-                ?.filter { geo.contains(it) || it == AppConfig.PSIPHON_SERVERS_DAT }
-                ?.filter { name ->
-                    val copy = File(extFolder, name)
-                    if (name == AppConfig.PSIPHON_SERVERS_DAT) {
-                        PsiphonServerList.bundledListGoesOver(copy, publishedAt, keptByUser)
-                    } else {
-                        !copy.exists() || copy.length() == 0L
-                    }
-                }
-                ?.forEach {
-                    val target = File(extFolder, it)
-                    assets.open(it).use { input ->
-                        FileOutputStream(target).use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                    if (it == AppConfig.PSIPHON_SERVERS_DAT && publishedAt > 0) target.setLastModified(publishedAt)
-                    LogUtil.i(AppConfig.TAG, "Copied from apk assets folder to ${target.absolutePath}")
-                }
-        } catch (e: Exception) {
-            LogUtil.e(ANG_PACKAGE, "asset copy failed", e)
+        if (assetsVerified && areCoreGeoAssetsPresent(extFolder)) {
+            return
         }
+
+        synchronized(initAssetsLock) {
+            if (assetsVerified && areCoreGeoAssetsPresent(extFolder)) {
+                return
+            }
+            try {
+                val extDir = File(extFolder)
+                if (!extDir.isDirectory && !extDir.mkdirs() && !extDir.isDirectory) {
+                    throw IOException("Unable to create asset directory: ${extDir.absolutePath}")
+                }
+                val lockFile = File(extDir, ".assets.lock")
+                RandomAccessFile(lockFile, "rw").use { lockRaf ->
+                    val fileLock = runCatching { lockRaf.channel.lock() }.getOrNull()
+                    try {
+                        sweepStaleTempFiles(extDir)
+                        val geo = arrayOf(AppConfig.GEOSITE_DAT, AppConfig.GEOIP_DAT, AppConfig.GEOIP_ONLY_CN_PRIVATE_DAT)
+                        // The bundled Psiphon list is the newest the build could fetch. It goes over the copy only when it
+                        // was published after the copy was made, never over a file the user picked, and the copy takes the
+                        // list's publication time so that the next build is compared with the list, not with the copy.
+                        val publishedAt = PsiphonServerList.publishedAt(
+                            runCatching { assets.open(AppConfig.PSIPHON_SERVERS_STAMP).use { it.bufferedReader().readText() } }.getOrNull()
+                        )
+                        // "file" is the address the Asset files screen saves for a file the user picked.
+                        val keptByUser = MmkvManager.decodeAssetUrls().any { it.assetUrl.remarks == AppConfig.PSIPHON_SERVERS_DAT && it.assetUrl.url == "file" }
+                        assets.list("")
+                            ?.filter { geo.contains(it) || it == AppConfig.PSIPHON_SERVERS_DAT }
+                            ?.filter { name ->
+                                val copy = File(extDir, name)
+                                if (name == AppConfig.PSIPHON_SERVERS_DAT) {
+                                    PsiphonServerList.bundledListGoesOver(copy, publishedAt, keptByUser)
+                                } else {
+                                    !copy.isFile || copy.length() <= 0L
+                                }
+                            }
+                            ?.forEach { assetName ->
+                                try {
+                                    copyAssetAtomically(assets, extDir, assetName, publishedAt)
+                                } catch (assetError: Exception) {
+                                    LogUtil.e(ANG_PACKAGE, "Failed to extract asset $assetName into ${extDir.absolutePath}", assetError)
+                                }
+                            }
+                        assetsVerified = areCoreGeoAssetsPresent(extFolder)
+                    } finally {
+                        runCatching { fileLock?.release() }
+                    }
+                }
+            } catch (e: Exception) {
+                assetsVerified = false
+                LogUtil.e(ANG_PACKAGE, "asset copy failed", e)
+            }
+        }
+    }
+
+    internal fun sweepStaleTempFiles(extDir: File) {
+        extDir.listFiles()
+            ?.filter { it.isFile && it.name.contains(".tmp.") }
+            ?.forEach { stale ->
+                runCatching { Files.deleteIfExists(stale.toPath()) }
+            }
+    }
+
+    internal fun copyAssetAtomically(
+        assets: AssetManager,
+        extDir: File,
+        assetName: String,
+        publishedAt: Long = 0L,
+    ) {
+        if (!extDir.isDirectory && !extDir.mkdirs() && !extDir.isDirectory) {
+            throw IOException("Asset destination directory does not exist: ${extDir.absolutePath}")
+        }
+        val target = File(extDir, assetName)
+        val tempFile = File(extDir, "$assetName.tmp.${System.nanoTime()}.${UUID.randomUUID()}")
+        try {
+            assets.open(assetName).use { input ->
+                FileOutputStream(tempFile).use { output ->
+                    input.copyTo(output, bufferSize = 64 * 1024)
+                    output.flush()
+                    output.fd.sync()
+                }
+            }
+            if (!tempFile.isFile || tempFile.length() <= 0L) {
+                throw IOException("Extracted asset '$assetName' produced an empty temporary file")
+            }
+            replaceFileSameFilesystem(tempFile, target)
+            if (assetName == AppConfig.PSIPHON_SERVERS_DAT && publishedAt > 0) {
+                target.setLastModified(publishedAt)
+            }
+            runCatching { LogUtil.i(AppConfig.TAG, "Copied from apk assets folder to ${target.absolutePath}") }
+        } finally {
+            if (tempFile.exists()) {
+                runCatching { Files.deleteIfExists(tempFile.toPath()) }
+                    .onFailure { tempFile.delete() }
+            }
+        }
+    }
+
+    internal fun replaceFileSameFilesystem(tempFile: File, target: File) {
+        val sourcePath = tempFile.toPath()
+        val targetPath = target.toPath()
+        try {
+            Files.move(
+                sourcePath,
+                targetPath,
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(
+                sourcePath,
+                targetPath,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        }
+    }
+
+    private fun areCoreGeoAssetsPresent(extFolder: String): Boolean {
+        val dir = File(extFolder)
+        val geoip = File(dir, AppConfig.GEOIP_DAT)
+        val geosite = File(dir, AppConfig.GEOSITE_DAT)
+        return geoip.isFile && geoip.length() > 0L && geosite.isFile && geosite.length() > 0L
     }
 
     /**

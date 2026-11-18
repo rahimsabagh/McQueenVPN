@@ -182,6 +182,9 @@ object RemoteServerManifestParser {
         if (!LauncherManager.hasUsableServer(profile)) {
             return false
         }
+        if (profile.insecure == true && profile.pinnedCA256.isNullOrBlank()) {
+            return false
+        }
         val host = profile.server?.trim().orEmpty()
         val port = profile.serverPort?.trim()?.toIntOrNull()
 

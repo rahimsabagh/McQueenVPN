@@ -8,6 +8,7 @@ import com.v2ray.ang.AppConfig
 import com.v2ray.ang.extension.delay
 import com.v2ray.ang.util.LogUtil
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,6 +36,15 @@ class NetworkMonitor(
     private val claimHandover: (NetworkMonitor) -> Boolean,
     private val onHandover: (NetworkMonitor) -> Unit,
     private val describe: () -> String,
+    private val buildRequest: () -> NetworkRequest = {
+        NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+            .build()
+    },
+    private val handoverDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val handoverDebounceMs: Long = HANDOVER_DEBOUNCE_MS,
+    private val logInfo: (String) -> Unit = { message -> LogUtil.i(AppConfig.TAG, message) },
 ) {
     private companion object {
         const val HANDOVER_DEBOUNCE_MS = 1000L
@@ -44,6 +54,8 @@ class NetworkMonitor(
     // thread, so the state below is read and written under this lock.
     private val lock = Any()
     private var upstream: Network? = null
+    private var lastReportedUnderlyingNetwork: Network? = null
+    private var hasDispatchedNull = false
     private var handoverJob: Job? = null
     private var registered = false
 
@@ -51,7 +63,7 @@ class NetworkMonitor(
     private val gate = HandoverGate()
 
     /** PattNG: owns the handover work, which [unregister] cancels. */
-    private val handoverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val handoverScope = CoroutineScope(SupervisorJob() + handoverDispatcher)
 
     /**
      * Unfortunately registerDefaultNetworkCallback is going to return our VPN interface:
@@ -63,29 +75,73 @@ class NetworkMonitor(
      *
      * Source: https://android.googlesource.com/platform/frameworks/base/+/2df4c7d/services/core/java/com/android/server/ConnectivityService.java#887
      */
-    private val request by lazy {
-        NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
-            .build()
-    }
+    private val request by lazy { buildRequest() }
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            val previous = synchronized(lock) { upstream.also { upstream = network } }
-            onUnderlyingNetworksChanged(arrayOf(network))
+            val previous: Network?
+            val shouldDispatch: Boolean
+            synchronized(lock) {
+                if (!registered) return
+                previous = upstream
+                upstream = network
+                shouldDispatch = lastReportedUnderlyingNetwork != network
+                if (shouldDispatch) {
+                    lastReportedUnderlyingNetwork = network
+                    hasDispatchedNull = false
+                }
+            }
+            if (shouldDispatch) {
+                onUnderlyingNetworksChanged(arrayOf(network))
+            }
             if (previous != null && previous != network) {
                 scheduleHandover(network)
             }
         }
 
         override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-            // it's a good idea to refresh capabilities
-            onUnderlyingNetworksChanged(arrayOf(network))
+            val shouldDispatch = synchronized(lock) {
+                if (!registered) return
+                val activeUpstream = upstream
+                if (activeUpstream != null && activeUpstream != network) {
+                    return
+                }
+                if (activeUpstream == null) {
+                    upstream = network
+                }
+                if (lastReportedUnderlyingNetwork != network) {
+                    lastReportedUnderlyingNetwork = network
+                    hasDispatchedNull = false
+                    true
+                } else {
+                    false
+                }
+            }
+            if (shouldDispatch) {
+                onUnderlyingNetworksChanged(arrayOf(network))
+            }
         }
 
         override fun onLost(network: Network) {
-            onUnderlyingNetworksChanged(null)
+            val shouldDispatchNull = synchronized(lock) {
+                if (!registered) return
+                val activeUpstream = upstream
+                if (activeUpstream != null && activeUpstream != network) {
+                    // Ignore delayed onLost from an old network after a new upstream already took over.
+                    return
+                }
+                upstream = null
+                if (lastReportedUnderlyingNetwork != null || !hasDispatchedNull) {
+                    lastReportedUnderlyingNetwork = null
+                    hasDispatchedNull = true
+                    true
+                } else {
+                    false
+                }
+            }
+            if (shouldDispatchNull) {
+                onUnderlyingNetworksChanged(null)
+            }
         }
     }
 
@@ -98,6 +154,8 @@ class NetworkMonitor(
             try {
                 connectivity.requestNetwork(request, callback)
                 registered = true
+                lastReportedUnderlyingNetwork = null
+                hasDispatchedNull = false
                 gate.open()
             } catch (e: Exception) {
                 LogUtil.e(AppConfig.TAG, "NetworkMonitor: ${describe()}, register: requesting the network failed", e)
@@ -117,6 +175,8 @@ class NetworkMonitor(
             handoverJob = null
             handoverScope.coroutineContext.cancelChildren()
             upstream = null
+            lastReportedUnderlyingNetwork = null
+            hasDispatchedNull = false
             if (!registered) return
             registered = false
         }
@@ -128,14 +188,14 @@ class NetworkMonitor(
     }
 
     private fun scheduleHandover(network: Network) {
-        LogUtil.i(AppConfig.TAG, "NetworkMonitor: Upstream is now $network")
+        logInfo("NetworkMonitor: Upstream is now $network")
         synchronized(lock) {
             // PattNG: a network callback that arrives after unregister() schedules nothing.
             if (!registered) return
             handoverJob?.cancel()
             handoverJob = handoverScope.launch {
                 try {
-                    delay(HANDOVER_DEBOUNCE_MS)
+                    delay(handoverDebounceMs)
                     // PattNG: cancelling ends the wait above, not a handover that has just come out of it. The handover
                     // goes on only once claimed under the gate, which unregister() closes first: an unregistered monitor
                     // claims nothing and calls nothing.

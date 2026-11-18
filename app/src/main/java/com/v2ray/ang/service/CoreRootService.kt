@@ -22,7 +22,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.lang.ref.SoftReference
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 class CoreRootService : Service(), ServiceControl {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -55,17 +54,31 @@ class CoreRootService : Service(), ServiceControl {
     override fun onDestroy() {
         val wasRunning = CoreServiceManager.isServiceRunning()
         startGate.markDestroyed()
-        runCatching {
-            serviceExecutor.submit {
-                stopInternal(forceRootStop = wasRunning || CoreServiceManager.isServiceRunning())
-            }.get(2_500L, TimeUnit.MILLISECONDS)
-        }
+        mainHandler.removeCallbacksAndMessages(null)
         NotificationManager.cancelNotification(this)
+
+        val appCtx = applicationContext
         if (CoreServiceManager.serviceControl?.get() === this) {
             CoreServiceManager.serviceControl = null
         }
+
+        val submitted = runCatching {
+            serviceExecutor.execute {
+                stopInternal(
+                    forceRootStop = wasRunning || CoreServiceManager.isServiceRunning(),
+                    notifyUiStop = wasRunning,
+                    fallbackContext = appCtx,
+                )
+            }
+            true
+        }.getOrDefault(false)
+
+        if (!submitted && wasRunning) {
+            runCatching { RootProxyManager.stop(appCtx) }
+        }
+
         serviceScope.cancel()
-        serviceExecutor.shutdownNow()
+        serviceExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -86,46 +99,73 @@ class CoreRootService : Service(), ServiceControl {
     override fun stopService() {
         val stopGen = startGate.beginStop()
         val stopStartId = startGate.currentStartId()
+        val appCtx = applicationContext
         serviceExecutor.execute {
-            stopInternal(forceRootStop = true)
+            stopInternal(
+                forceRootStop = true,
+                notifyUiStop = true,
+                fallbackContext = appCtx,
+            )
             scheduleStopForegroundAndSelf(stopGen, stopStartId)
+        }
+    }
+
+    override fun restartService() {
+        NotificationManager.ensureForeground(this)
+        val startId = startGate.currentStartId()
+        val opGen = startGate.beginStart(startId)
+        if (opGen < 0L) return
+        MessageHelper.sendMsg2UI(this, AppConfig.MSG_STATE_CONNECTING, "")
+        serviceExecutor.execute {
+            performStart(opGen, startId)
         }
     }
 
     private fun performStart(opGen: Long, startId: Int) {
         if (!startGate.shouldContinueStart(opGen)) return
         if (CoreServiceManager.isServiceRunning()) {
-            stopInternal(forceRootStop = true)
+            stopInternal(forceRootStop = true, notifyUiStop = false)
         }
         if (!startGate.shouldContinueStart(opGen)) return
 
         rootStartupJob?.cancel()
         if (!CoreServiceManager.startCoreLoop(null)) {
-            stopInternal(forceRootStop = false)
+            stopInternal(forceRootStop = false, notifyUiStop = false)
             scheduleStopForegroundAndSelf(opGen, startId)
             return
         }
 
         if (!startGate.shouldContinueStart(opGen)) {
-            stopInternal(forceRootStop = true)
+            stopInternal(forceRootStop = true, notifyUiStop = false)
             return
         }
 
         rootStartupJob = serviceScope.launch {
             if (!RootProxyManager.start(this@CoreRootService)) {
-                LogUtil.e(AppConfig.TAG, "RootProxyManager failed to start, stopping CoreRootService")
-                MessageHelper.sendMsg2UI(this@CoreRootService, AppConfig.MSG_STATE_START_FAILURE, "")
-                stopService()
+                if (startGate.shouldContinueStart(opGen)) {
+                    LogUtil.e(AppConfig.TAG, "RootProxyManager failed to start, stopping CoreRootService")
+                    MessageHelper.sendMsg2UI(this@CoreRootService, AppConfig.MSG_STATE_START_FAILURE, "")
+                    stopService()
+                }
             }
         }
     }
 
-    private fun stopInternal(forceRootStop: Boolean) {
+    private fun stopInternal(
+        forceRootStop: Boolean,
+        notifyUiStop: Boolean = false,
+        fallbackContext: Context = applicationContext,
+    ) {
         rootStartupJob?.cancel()
         rootStartupJob = null
         if (forceRootStop || CoreServiceManager.isServiceRunning()) {
-            RootProxyManager.stop(this)
-            CoreServiceManager.stopCoreLoop(cancelForeground = false)
+            RootProxyManager.stop(fallbackContext)
+            CoreServiceManager.stopCoreLoop(
+                cancelForeground = false,
+                fallbackContext = fallbackContext,
+                emitStopBroadcast = notifyUiStop,
+                notifyEvenIfIdle = notifyUiStop,
+            )
         }
     }
 

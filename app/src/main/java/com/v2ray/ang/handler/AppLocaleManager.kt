@@ -11,11 +11,16 @@ import androidx.core.content.ContextCompat
 import androidx.core.os.ConfigurationCompat
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.enums.Language
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Keeps the legacy in-app language preference synchronized with Android's per-app locale APIs.
  */
 object AppLocaleManager {
+    private val syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Migrates the existing MMKV language preference and restores it before the first activity.
@@ -118,8 +123,8 @@ object AppLocaleManager {
         }
 
         fun completeMigration(context: Context) {
-            val localeManager = context.getSystemService(LocaleManager::class.java)
             if (!MmkvManager.decodeSettingsBool(AppConfig.PREF_APP_LOCALE_MIGRATED, false)) {
+                val localeManager = context.getSystemService(LocaleManager::class.java)
                 val frameworkLanguage = Language.fromLanguageTag(
                     localeManager.applicationLocales.get(0)?.toLanguageTag()
                 )
@@ -134,7 +139,13 @@ object AppLocaleManager {
                 return
             }
 
-            syncLegacyPreference(localeManager.applicationLocales.get(0)?.toLanguageTag())
+            val appContext = context.applicationContext
+            syncScope.launch {
+                runCatching {
+                    val localeManager = appContext.getSystemService(LocaleManager::class.java)
+                    syncLegacyPreference(localeManager.applicationLocales.get(0)?.toLanguageTag())
+                }
+            }
         }
     }
 }

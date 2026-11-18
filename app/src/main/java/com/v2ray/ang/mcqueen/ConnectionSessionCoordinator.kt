@@ -26,6 +26,7 @@ class ConnectionSessionCoordinator {
     private var currentIndex: Int = 0
     private var attemptsUsed: Int = 0
     private var hasConnectedInSession: Boolean = false
+    private var serviceLaunchedForAttempt: Boolean = false
 
     var activeOperationId: Long = 0L
         private set
@@ -39,8 +40,10 @@ class ConnectionSessionCoordinator {
     var userRequestedDisconnect: Boolean = false
         private set
 
+    @Synchronized
     fun currentState(): VpnConnectionState = state
 
+    @Synchronized
     fun currentGuid(): String? = candidates.getOrNull(currentIndex)
 
     /**
@@ -85,6 +88,7 @@ class ConnectionSessionCoordinator {
         currentIndex = 0
         attemptsUsed = 0
         hasConnectedInSession = false
+        serviceLaunchedForAttempt = false
         state = VpnConnectionState.RECONNECTING
         return activeOperationId
     }
@@ -116,6 +120,7 @@ class ConnectionSessionCoordinator {
         currentIndex = 0
         attemptsUsed = 1
         hasConnectedInSession = false
+        serviceLaunchedForAttempt = false
         state = VpnConnectionState.RECONNECTING
         return candidates.first()
     }
@@ -126,6 +131,53 @@ class ConnectionSessionCoordinator {
     @Synchronized
     fun isCurrentOperation(operationId: Long): Boolean {
         return operationId == activeOperationId && !userRequestedDisconnect
+    }
+
+    @Synchronized
+    fun markServiceLaunched(operationId: Long = activeOperationId): Boolean {
+        if (!isCurrentOperation(operationId)) return false
+        serviceLaunchedForAttempt = true
+        return true
+    }
+
+    @Synchronized
+    fun hasLaunchedOrActiveService(): Boolean =
+        serviceLaunchedForAttempt ||
+            state == VpnConnectionState.CONNECTED ||
+            state == VpnConnectionState.RECONNECTING
+
+    @Synchronized
+    fun isAwaitingSwitchStop(): Boolean =
+        state == VpnConnectionState.RECONNECTING && isSwitchingCountry && candidates.isEmpty()
+
+    @Synchronized
+    fun canAcceptRuntimeFailure(): Boolean {
+        if (userRequestedDisconnect) return false
+        return when (state) {
+            VpnConnectionState.DISCONNECTED,
+            VpnConnectionState.FAILED,
+            VpnConnectionState.PREPARING -> false
+            VpnConnectionState.CONNECTING -> serviceLaunchedForAttempt
+            VpnConnectionState.RECONNECTING -> candidates.isNotEmpty()
+            VpnConnectionState.CONNECTED -> true
+        }
+    }
+
+    @Synchronized
+    fun recoverConnecting(countryCode: String? = activeCountryCode) {
+        if (state != VpnConnectionState.DISCONNECTED) return
+        activeOperationId++
+        if (!countryCode.isNullOrBlank()) {
+            activeCountryCode = countryCode
+        }
+        userRequestedDisconnect = false
+        isSwitchingCountry = false
+        candidates = emptyList()
+        currentIndex = 0
+        attemptsUsed = 0
+        hasConnectedInSession = false
+        serviceLaunchedForAttempt = true
+        state = VpnConnectionState.CONNECTING
     }
 
     @Synchronized
@@ -140,6 +192,7 @@ class ConnectionSessionCoordinator {
         currentIndex = 0
         attemptsUsed = 0
         hasConnectedInSession = false
+        serviceLaunchedForAttempt = false
         state = VpnConnectionState.PREPARING
         return state
     }
@@ -163,6 +216,7 @@ class ConnectionSessionCoordinator {
             currentIndex = 0
             attemptsUsed = 0
             hasConnectedInSession = false
+            serviceLaunchedForAttempt = false
             state = VpnConnectionState.FAILED
             return null
         }
@@ -170,6 +224,7 @@ class ConnectionSessionCoordinator {
         currentIndex = 0
         attemptsUsed = 1
         hasConnectedInSession = false
+        serviceLaunchedForAttempt = false
         state = VpnConnectionState.CONNECTING
         return candidates.first()
     }
@@ -178,6 +233,7 @@ class ConnectionSessionCoordinator {
     fun onStartSuccess(): VpnConnectionState {
         hasConnectedInSession = true
         isSwitchingCountry = false
+        serviceLaunchedForAttempt = true
         state = VpnConnectionState.CONNECTED
         return state
     }
@@ -209,14 +265,51 @@ class ConnectionSessionCoordinator {
         return FailoverDecision.Exhausted(reason)
     }
 
+    /**
+     * Handles passive [AppConfig.MSG_STATE_NOT_RUNNING] status replies (e.g. when querying service
+     * state on host resume or during permission/provisioning before the daemon has started).
+     * Never aborts in-flight [VpnConnectionState.PREPARING], [VpnConnectionState.CONNECTING],
+     * or [VpnConnectionState.RECONNECTING] attempts.
+     */
+    @Synchronized
+    fun onServiceNotRunningQuery(preserveFailure: Boolean = true): VpnConnectionState {
+        return when (state) {
+            VpnConnectionState.PREPARING,
+            VpnConnectionState.CONNECTING,
+            VpnConnectionState.RECONNECTING -> state
+
+            VpnConnectionState.FAILED -> {
+                if (preserveFailure) VpnConnectionState.FAILED else VpnConnectionState.DISCONNECTED
+            }
+
+            VpnConnectionState.CONNECTED,
+            VpnConnectionState.DISCONNECTED -> {
+                if (isSwitchingCountry) {
+                    state = VpnConnectionState.RECONNECTING
+                    VpnConnectionState.RECONNECTING
+                } else {
+                    state = VpnConnectionState.DISCONNECTED
+                    VpnConnectionState.DISCONNECTED
+                }
+            }
+        }
+    }
+
     @Synchronized
     fun onServiceStopped(preserveFailure: Boolean = false): VpnConnectionState {
         if (state == VpnConnectionState.RECONNECTING || isSwitchingCountry) {
             return VpnConnectionState.RECONNECTING
         }
+        if (state == VpnConnectionState.PREPARING ||
+            (state == VpnConnectionState.CONNECTING && !serviceLaunchedForAttempt)
+        ) {
+            // Delayed stop broadcast from an earlier session must not abort a fresh pre-launch attempt.
+            return state
+        }
         if (preserveFailure && state == VpnConnectionState.FAILED) {
             return VpnConnectionState.FAILED
         }
+        serviceLaunchedForAttempt = false
         state = if (state == VpnConnectionState.FAILED) {
             VpnConnectionState.FAILED
         } else {
@@ -234,6 +327,7 @@ class ConnectionSessionCoordinator {
         currentIndex = 0
         attemptsUsed = 0
         hasConnectedInSession = false
+        serviceLaunchedForAttempt = false
         state = VpnConnectionState.DISCONNECTED
         return state
     }

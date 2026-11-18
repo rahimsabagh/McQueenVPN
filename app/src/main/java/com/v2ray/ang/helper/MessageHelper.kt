@@ -17,6 +17,7 @@ import java.io.Serializable
 object MessageHelper {
     const val EXTRA_REQUEST_ID = "requestId"
     const val EXTRA_DELAY_MS = "delayMs"
+    const val EXTRA_SESSION_START_MS = "sessionStartMs"
 
     /**
      * Sends a message to the service.
@@ -73,8 +74,17 @@ object MessageHelper {
         content: Serializable,
         requestId: String? = null,
         delayMs: Long? = null,
+        sessionStartMs: Long? = null,
     ) {
-        sendMsg(ctx, AppConfig.BROADCAST_ACTION_ACTIVITY, what, content, requestId, delayMs)
+        sendMsg(
+            ctx = ctx,
+            action = AppConfig.BROADCAST_ACTION_ACTIVITY,
+            what = what,
+            content = content,
+            requestId = requestId,
+            delayMs = delayMs,
+            sessionStartMs = sessionStartMs,
+        )
     }
 
     /**
@@ -164,11 +174,13 @@ object MessageHelper {
         content: Serializable,
         requestId: String? = null,
         delayMs: Long? = null,
+        sessionStartMs: Long? = null,
     ) {
         try {
             ctx.sendBroadcast(messageIntent(action, what, content).apply {
                 requestId?.let { putExtra(EXTRA_REQUEST_ID, it) }
                 delayMs?.let { putExtra(EXTRA_DELAY_MS, it) }
+                sessionStartMs?.takeIf { it > 0L }?.let { putExtra(EXTRA_SESSION_START_MS, it) }
             })
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to send message with action: $action", e)

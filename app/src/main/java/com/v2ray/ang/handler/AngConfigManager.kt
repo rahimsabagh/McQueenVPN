@@ -504,7 +504,7 @@ object AngConfigManager {
                     return SubscriptionUpdateResult(failureCount = 1)
                 }
             }
-            LogUtil.i(AppConfig.TAG, url)
+            LogUtil.i(AppConfig.TAG, HttpUtil.redactUrlForLogging(url))
             val userAgent = it.subscription.userAgent
             val requestHeaders = it.subscription.requestHeaders
             val proxyUsername = SettingsManager.getSocksUsername()

@@ -6,13 +6,14 @@ import android.content.Intent
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import com.v2ray.ang.AppConfig
 import com.v2ray.ang.contracts.ServiceControl
 import com.v2ray.ang.core.CoreServiceManager
 import com.v2ray.ang.handler.AppLocaleManager
 import com.v2ray.ang.handler.NotificationManager
+import com.v2ray.ang.helper.MessageHelper
 import java.lang.ref.SoftReference
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 class CoreProxyOnlyService : Service(), ServiceControl {
     private val startGate = DaemonStartGate()
@@ -43,18 +44,29 @@ class CoreProxyOnlyService : Service(), ServiceControl {
     override fun onDestroy() {
         val wasRunning = CoreServiceManager.isServiceRunning()
         startGate.markDestroyed()
-        runCatching {
-            serviceExecutor.submit {
-                if (wasRunning || CoreServiceManager.isServiceRunning()) {
-                    CoreServiceManager.stopCoreLoop(cancelForeground = false)
-                }
-            }.get(2_500L, TimeUnit.MILLISECONDS)
-        }
+        mainHandler.removeCallbacksAndMessages(null)
         NotificationManager.cancelNotification(this)
+
+        val appCtx = applicationContext
         if (CoreServiceManager.serviceControl?.get() === this) {
             CoreServiceManager.serviceControl = null
         }
-        serviceExecutor.shutdownNow()
+
+        if (wasRunning) {
+            runCatching {
+                serviceExecutor.execute {
+                    if (CoreServiceManager.isServiceRunning()) {
+                        CoreServiceManager.stopCoreLoop(
+                            cancelForeground = false,
+                            fallbackContext = appCtx,
+                            emitStopBroadcast = true,
+                            notifyEvenIfIdle = true,
+                        )
+                    }
+                }
+            }
+        }
+        serviceExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -75,23 +87,48 @@ class CoreProxyOnlyService : Service(), ServiceControl {
     override fun stopService() {
         val stopGen = startGate.beginStop()
         val stopStartId = startGate.currentStartId()
+        val appCtx = applicationContext
         serviceExecutor.execute {
-            if (CoreServiceManager.isServiceRunning()) {
-                CoreServiceManager.stopCoreLoop(cancelForeground = false)
-            }
+            CoreServiceManager.stopCoreLoop(
+                cancelForeground = false,
+                fallbackContext = appCtx,
+                emitStopBroadcast = true,
+                notifyEvenIfIdle = true,
+            )
             scheduleStopForegroundAndSelf(stopGen, stopStartId)
+        }
+    }
+
+    override fun restartService() {
+        NotificationManager.ensureForeground(this)
+        val startId = startGate.currentStartId()
+        val opGen = startGate.beginStart(startId)
+        if (opGen < 0L) return
+        MessageHelper.sendMsg2UI(this, AppConfig.MSG_STATE_CONNECTING, "")
+        serviceExecutor.execute {
+            performStart(opGen, startId)
         }
     }
 
     private fun performStart(opGen: Long, startId: Int) {
         if (!startGate.shouldContinueStart(opGen)) return
         if (CoreServiceManager.isServiceRunning()) {
-            CoreServiceManager.stopCoreLoop(cancelForeground = false)
+            CoreServiceManager.stopCoreLoop(
+                cancelForeground = false,
+                fallbackContext = applicationContext,
+                emitStopBroadcast = false,
+                notifyEvenIfIdle = false,
+            )
         }
         if (!startGate.shouldContinueStart(opGen)) return
         if (!CoreServiceManager.startCoreLoop(null)) {
             if (CoreServiceManager.isServiceRunning()) {
-                CoreServiceManager.stopCoreLoop(cancelForeground = false)
+                CoreServiceManager.stopCoreLoop(
+                    cancelForeground = false,
+                    fallbackContext = applicationContext,
+                    emitStopBroadcast = false,
+                    notifyEvenIfIdle = false,
+                )
             }
             scheduleStopForegroundAndSelf(opGen, startId)
         }

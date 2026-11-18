@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.v2ray.ang.AppConfig
@@ -38,6 +39,7 @@ import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import java.lang.ref.SoftReference
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 object CoreServiceManager {
     private const val AETHER_WARMUP_TIMEOUT_MS = 30_000L
@@ -49,15 +51,22 @@ object CoreServiceManager {
         get() = coreControllerDelegate.value
     private val mMsgReceive = ReceiveMessageHandler()
     private val coreLifecycleLock = Any()
+    private val receiverLock = Any()
+    private val sessionSeq = AtomicLong(0L)
     private val daemonScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var currentConfig: ProfileItem? = null
     private var currentVpnInterface: ParcelFileDescriptor? = null
     private var networkMonitor: NetworkMonitor? = null
     private var dialerService: IDialerService? = null
-    private var activeMeasureJob: Job? = null
-    private var aetherWarmUpJob: Job? = null
+    private var registeredReceiverContext: Context? = null
 
+    @Volatile
+    private var activeMeasureJob: Job? = null
+    @Volatile
+    private var aetherWarmUpJob: Job? = null
+    @Volatile
+    private var hasActiveSession: Boolean = false
     @Volatile
     private var isReloading: Boolean = false
     @Volatile
@@ -67,6 +76,7 @@ object CoreServiceManager {
     @Volatile
     private var sessionStartedAtMs: Long = 0L
 
+    @Volatile
     var serviceControl: SoftReference<ServiceControl>? = null
         set(value) {
             field = value
@@ -87,21 +97,50 @@ object CoreServiceManager {
         }
 
         val service = getService() ?: return false
-        val guid = MmkvManager.getSelectServer() ?: return false
-        val config = MmkvManager.decodeServerConfig(guid) ?: return false
+        val appContext = service.applicationContext
+        val mySeq = sessionSeq.incrementAndGet()
+
+        val guid = MmkvManager.getSelectServer()
+        if (guid == null) {
+            if (sessionSeq.get() == mySeq) {
+                MessageHelper.sendMsg2UI(appContext, AppConfig.MSG_STATE_START_FAILURE, "")
+            }
+            return false
+        }
+        val config = MmkvManager.decodeServerConfig(guid)
+        if (config == null) {
+            if (sessionSeq.get() == mySeq) {
+                MessageHelper.sendMsg2UI(appContext, AppConfig.MSG_STATE_START_FAILURE, "")
+            }
+            return false
+        }
 
         try {
-            CoreNativeManager.initCoreEnv(service.applicationContext)
+            CoreNativeManager.initCoreEnv(appContext)
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to initialize core env before startCoreLoop", e)
-            MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, "")
+            if (sessionSeq.get() == mySeq) {
+                MessageHelper.sendMsg2UI(appContext, AppConfig.MSG_STATE_START_FAILURE, "")
+            }
+            return false
+        }
+
+        if (sessionSeq.get() != mySeq || serviceControl?.get()?.getService() !== service) {
+            LogUtil.i(AppConfig.TAG, "CoreServiceManager: Aborting superseded startCoreLoop after initCoreEnv seq=$mySeq")
             return false
         }
 
         val result = CoreConfigManager.getV2rayConfig(service, guid)
         if (!result.status) {
-            val errorMsg = result.errorMessage.takeIf { result.localizedError } ?: ""
-            MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, errorMsg)
+            if (sessionSeq.get() == mySeq) {
+                val errorMsg = result.errorMessage.takeIf { result.localizedError } ?: ""
+                MessageHelper.sendMsg2UI(appContext, AppConfig.MSG_STATE_START_FAILURE, errorMsg)
+            }
+            return false
+        }
+
+        if (sessionSeq.get() != mySeq || serviceControl?.get()?.getService() !== service) {
+            LogUtil.i(AppConfig.TAG, "CoreServiceManager: Aborting superseded startCoreLoop after config build seq=$mySeq")
             return false
         }
 
@@ -109,8 +148,10 @@ object CoreServiceManager {
         if (aetherCore != null) {
             AetherCoreManager.refusalOf(aetherCore, result.content)?.let { refusal ->
                 LogUtil.e(AppConfig.TAG, "CoreServiceManager: refusing Aether session: ${refusal.reason}")
-                val msg = service.getString(refusal.message, refusal.argument)
-                MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, msg)
+                if (sessionSeq.get() == mySeq) {
+                    val msg = service.getString(refusal.message, refusal.argument)
+                    MessageHelper.sendMsg2UI(appContext, AppConfig.MSG_STATE_START_FAILURE, msg)
+                }
                 return false
             }
 
@@ -123,33 +164,55 @@ object CoreServiceManager {
                 timeoutMs = AetherCoreManager.PORT_CHECK_WAIT_MS
             )
             if (portCheck is AetherCoreManager.PortCheck.Taken) {
-                val msg = service.getString(AetherCoreManager.takenMessage(portCheck), portCheck.port)
-                MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, msg)
+                if (sessionSeq.get() == mySeq) {
+                    val msg = service.getString(AetherCoreManager.takenMessage(portCheck), portCheck.port)
+                    MessageHelper.sendMsg2UI(appContext, AppConfig.MSG_STATE_START_FAILURE, msg)
+                }
                 return false
             }
         }
 
-        val mFilter = IntentFilter(AppConfig.BROADCAST_ACTION_SERVICE)
-        mFilter.addAction(Intent.ACTION_SCREEN_ON)
-        mFilter.addAction(Intent.ACTION_SCREEN_OFF)
-        mFilter.addAction(Intent.ACTION_USER_PRESENT)
-        ContextCompat.registerReceiver(service, mMsgReceive, mFilter, Utils.receiverFlags())
+        synchronized(coreLifecycleLock) {
+            if (sessionSeq.get() != mySeq || serviceControl?.get()?.getService() !== service) {
+                LogUtil.i(AppConfig.TAG, "CoreServiceManager: Aborting superseded startCoreLoop before receiver register seq=$mySeq")
+                return false
+            }
+            currentConfig = config
+            currentVpnInterface = vpnInterface
+            stoppedDuringReload = false
+            isReloading = false
+            hasActiveSession = true
+        }
 
-        currentConfig = config
-        currentVpnInterface = vpnInterface
-        stoppedDuringReload = false
-        isReloading = false
+        registerServiceReceiver(appContext)
 
-        val started = startCoreInstance(service, result, vpnInterface, isReload = false)
+        val started = startCoreInstance(
+            service = service,
+            result = result,
+            vpnInterface = vpnInterface,
+            isReload = false,
+            expectedSessionSeq = mySeq,
+        )
         if (!started) {
-            try {
-                service.unregisterReceiver(mMsgReceive)
-            } catch (_: Exception) {
+            synchronized(coreLifecycleLock) {
+                if (sessionSeq.get() == mySeq) {
+                    hasActiveSession = false
+                    currentVpnInterface = null
+                    currentConfig = null
+                }
+            }
+            if (sessionSeq.get() == mySeq) {
+                unregisterServiceReceiver()
             }
             return false
         }
 
-        startNetworkMonitor(service)
+        if (sessionSeq.get() != mySeq || serviceControl?.get()?.getService() !== service) {
+            LogUtil.i(AppConfig.TAG, "CoreServiceManager: Session seq=$mySeq superseded immediately after startCoreInstance")
+            return false
+        }
+
+        startNetworkMonitor(service, mySeq)
         return true
     }
 
@@ -157,23 +220,34 @@ object CoreServiceManager {
         service: Service,
         result: ConfigResult,
         vpnInterface: ParcelFileDescriptor?,
-        isReload: Boolean
+        isReload: Boolean,
+        expectedSessionSeq: Long,
     ): Boolean {
         try {
             val fd = vpnInterface?.fd ?: 0
             synchronized(coreLifecycleLock) {
+                if (sessionSeq.get() != expectedSessionSeq) {
+                    return false
+                }
+                if (isReload && (!hasActiveSession || stoppedDuringReload)) {
+                    return false
+                }
                 coreController.startLoop(result.content, fd)
             }
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to start Core loop", e)
-            if (!isReload) {
+            if (!isReload && sessionSeq.get() == expectedSessionSeq) {
                 MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, "")
             }
             return false
         }
 
+        if (sessionSeq.get() != expectedSessionSeq) {
+            return false
+        }
+
         if (!isRunning()) {
-            if (!isReload) {
+            if (!isReload && sessionSeq.get() == expectedSessionSeq) {
                 MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, "")
             }
             return false
@@ -182,15 +256,20 @@ object CoreServiceManager {
         val aetherCore = result.aetherCore
         if (!isReload) {
             sessionStartedAtMs = System.currentTimeMillis()
-            NotificationManager.onSessionStart(sessionStartedAtMs)
+            NotificationManager.onSessionStart(sessionStartedAtMs, isScreenInteractive(service))
             NotificationManager.showNotification(currentConfig, service)
             NotificationManager.startSpeedNotification(currentConfig)
 
             if (aetherCore != null) {
-                startAetherSessionAndWarmUp(service, aetherCore)
-            } else {
+                startAetherSessionAndWarmUp(service, aetherCore, expectedSessionSeq)
+            } else if (sessionSeq.get() == expectedSessionSeq) {
                 isAetherWarmingUp = false
-                MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_SUCCESS, "")
+                MessageHelper.sendMsg2UI(
+                    service,
+                    AppConfig.MSG_STATE_START_SUCCESS,
+                    "",
+                    sessionStartMs = sessionStartedAtMs,
+                )
             }
         } else {
             if (sessionStartedAtMs == 0L) {
@@ -203,7 +282,12 @@ object CoreServiceManager {
         return true
     }
 
-    private fun startAetherSessionAndWarmUp(service: Service, aetherCore: AetherCore) {
+    private fun startAetherSessionAndWarmUp(
+        service: Service,
+        aetherCore: AetherCore,
+        expectedSessionSeq: Long,
+    ) {
+        if (sessionSeq.get() != expectedSessionSeq) return
         isAetherWarmingUp = true
         MessageHelper.sendMsg2UI(
             service,
@@ -213,7 +297,7 @@ object CoreServiceManager {
 
         aetherWarmUpJob?.cancel()
         AetherCoreManager.start(service, aetherCore, afterProbes = true) {
-            if (isServiceRunning()) {
+            if (sessionSeq.get() == expectedSessionSeq && isServiceRunning()) {
                 val reason = AetherCoreManager.stoppedMessage(service)
                 MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, reason)
                 serviceControl?.get()?.stopService()
@@ -222,6 +306,10 @@ object CoreServiceManager {
 
         aetherWarmUpJob = daemonScope.launch {
             val listening = AetherCoreManager.awaitListening(AETHER_WARMUP_TIMEOUT_MS)
+            if (sessionSeq.get() != expectedSessionSeq) {
+                isAetherWarmingUp = false
+                return@launch
+            }
             val outcome = AetherCoreManager.warmUpOutcome(
                 listening = listening,
                 active = isActiveJob(),
@@ -230,13 +318,22 @@ object CoreServiceManager {
             when (outcome) {
                 AetherCoreManager.WarmUpOutcome.LISTENING -> {
                     isAetherWarmingUp = false
-                    MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_SUCCESS, "")
+                    if (sessionSeq.get() == expectedSessionSeq) {
+                        MessageHelper.sendMsg2UI(
+                            service,
+                            AppConfig.MSG_STATE_START_SUCCESS,
+                            "",
+                            sessionStartMs = sessionStartedAtMs,
+                        )
+                    }
                 }
                 AetherCoreManager.WarmUpOutcome.CORE_EXITED -> {
                     isAetherWarmingUp = false
-                    val reason = AetherCoreManager.stoppedMessage(service)
-                    MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, reason)
-                    serviceControl?.get()?.stopService()
+                    if (sessionSeq.get() == expectedSessionSeq) {
+                        val reason = AetherCoreManager.stoppedMessage(service)
+                        MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, reason)
+                        serviceControl?.get()?.stopService()
+                    }
                 }
                 AetherCoreManager.WarmUpOutcome.ABANDONED -> {
                     isAetherWarmingUp = false
@@ -250,15 +347,14 @@ object CoreServiceManager {
     /**
      * Reloads Xray on network handover while keeping the service, tunnel, and Aether core running.
      */
-    private fun reloadCoreOnHandover(askedBy: NetworkMonitor) {
-        val service = getService() ?: return
-        val guid = MmkvManager.getSelectServer() ?: return
-        val config = MmkvManager.decodeServerConfig(guid) ?: return
-
-        isReloading = true
+    private fun reloadCoreOnHandover(askedBy: NetworkMonitor, reloadSeq: Long) {
         var coreRunningAfterReload = false
         try {
-            if (!ReloadOutcome.goesOn(askedBy, networkMonitor)) return
+            val service = getService() ?: return
+            val guid = MmkvManager.getSelectServer() ?: return
+            val config = MmkvManager.decodeServerConfig(guid) ?: return
+
+            if (!ReloadOutcome.goesOn(askedBy, networkMonitor) || sessionSeq.get() != reloadSeq) return
 
             val result = CoreConfigManager.getV2rayConfig(service, guid)
             if (!result.status) {
@@ -266,40 +362,72 @@ object CoreServiceManager {
                 return
             }
 
+            val vpnFd: ParcelFileDescriptor?
             synchronized(coreLifecycleLock) {
-                if (coreController.isRunning) {
+                if (!ReloadOutcome.goesOn(askedBy, networkMonitor) ||
+                    stoppedDuringReload ||
+                    sessionSeq.get() != reloadSeq
+                ) {
+                    return
+                }
+                if (coreControllerDelegate.isInitialized() && coreController.isRunning) {
                     try {
                         coreController.stopLoop()
                     } catch (e: Exception) {
                         LogUtil.e(AppConfig.TAG, "Failed to stop V2Ray loop during reload", e)
                     }
                 }
+                if (!ReloadOutcome.goesOn(askedBy, networkMonitor) ||
+                    stoppedDuringReload ||
+                    sessionSeq.get() != reloadSeq
+                ) {
+                    return
+                }
+                vpnFd = currentVpnInterface
+                currentConfig = config
             }
 
-            if (!ReloadOutcome.goesOn(askedBy, networkMonitor) || stoppedDuringReload) {
-                return
-            }
-
-            currentConfig = config
-            coreRunningAfterReload = startCoreInstance(service, result, currentVpnInterface, isReload = true)
-        } finally {
-            val outcome = ReloadOutcome.of(
-                coreRunning = coreController.isRunning && coreRunningAfterReload,
-                stoppedMeanwhile = stoppedDuringReload
+            coreRunningAfterReload = startCoreInstance(
+                service = service,
+                result = result,
+                vpnInterface = vpnFd,
+                isReload = true,
+                expectedSessionSeq = reloadSeq,
             )
-            isReloading = false
+        } finally {
+            val outcome = synchronized(coreLifecycleLock) {
+                if (sessionSeq.get() != reloadSeq) {
+                    isReloading = false
+                    null
+                } else {
+                    val running = coreControllerDelegate.isInitialized() &&
+                        coreController.isRunning &&
+                        coreRunningAfterReload
+                    isReloading = false
+                    ReloadOutcome.of(
+                        coreRunning = running,
+                        stoppedMeanwhile = stoppedDuringReload
+                    )
+                }
+            }
             when (outcome) {
-                ReloadOutcome.KEEP_RUNNING -> Unit
+                null, ReloadOutcome.KEEP_RUNNING -> Unit
                 ReloadOutcome.STOP_SERVICE -> {
                     serviceControl?.get()?.stopService()
                 }
                 ReloadOutcome.RELEASE_CORES -> {
                     synchronized(coreLifecycleLock) {
-                        runCatching {
-                            if (coreController.isRunning) coreController.stopLoop()
+                        if (sessionSeq.get() == reloadSeq) {
+                            runCatching {
+                                if (coreControllerDelegate.isInitialized() && coreController.isRunning) {
+                                    coreController.stopLoop()
+                                }
+                            }
                         }
                     }
-                    AetherCoreManager.stop()
+                    if (sessionSeq.get() == reloadSeq) {
+                        AetherCoreManager.stop()
+                    }
                 }
             }
         }
@@ -309,10 +437,27 @@ object CoreServiceManager {
      * Stops the V2Ray and Aether cores synchronously before emitting MSG_STATE_STOP_SUCCESS.
      * This prevents port or instance collisions when switching countries while connected.
      */
-    fun stopCoreLoop(cancelForeground: Boolean = true): Boolean {
-        val service = getService() ?: return false
+    fun stopCoreLoop(
+        cancelForeground: Boolean = true,
+        fallbackContext: Context? = null,
+        emitStopBroadcast: Boolean = true,
+        notifyEvenIfIdle: Boolean = true,
+    ): Boolean {
+        val service = getService()
+        val msgContext = service
+            ?: fallbackContext
+            ?: synchronized(receiverLock) { registeredReceiverContext }
 
-        stoppedDuringReload = true
+        val hadActive = synchronized(coreLifecycleLock) {
+            sessionSeq.incrementAndGet()
+            stoppedDuringReload = true
+            val wasActive = hasActiveSession ||
+                isAetherWarmingUp ||
+                (coreControllerDelegate.isInitialized() && coreController.isRunning)
+            hasActiveSession = false
+            wasActive
+        }
+
         stopNetworkMonitor()
 
         activeMeasureJob?.cancel()
@@ -332,27 +477,52 @@ object CoreServiceManager {
                     LogUtil.e(AppConfig.TAG, "Failed to stop V2Ray loop", e)
                 }
             }
+            currentVpnInterface = null
+            currentConfig = null
+            sessionStartedAtMs = 0L
         }
 
-        currentVpnInterface = null
-        sessionStartedAtMs = 0L
-        MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_STOP_SUCCESS, "")
+        if (emitStopBroadcast && (hadActive || notifyEvenIfIdle) && msgContext != null) {
+            MessageHelper.sendMsg2UI(msgContext, AppConfig.MSG_STATE_STOP_SUCCESS, "")
+        }
         if (cancelForeground) {
             NotificationManager.cancelNotification(service)
         } else {
             NotificationManager.stopSessionStats()
         }
 
-        try {
-            service.unregisterReceiver(mMsgReceive)
-        } catch (e: Exception) {
-            LogUtil.d(AppConfig.TAG, "Broadcast receiver already unregistered or not registered")
-        }
+        unregisterServiceReceiver()
 
-        return true
+        return hadActive
     }
 
-    private fun startNetworkMonitor(service: Service) {
+    private fun registerServiceReceiver(appContext: Context) {
+        synchronized(receiverLock) {
+            if (registeredReceiverContext != null) {
+                return
+            }
+            val mFilter = IntentFilter(AppConfig.BROADCAST_ACTION_SERVICE)
+            mFilter.addAction(Intent.ACTION_SCREEN_ON)
+            mFilter.addAction(Intent.ACTION_SCREEN_OFF)
+            mFilter.addAction(Intent.ACTION_USER_PRESENT)
+            ContextCompat.registerReceiver(appContext, mMsgReceive, mFilter, Utils.receiverFlags())
+            registeredReceiverContext = appContext
+        }
+    }
+
+    private fun unregisterServiceReceiver() {
+        synchronized(receiverLock) {
+            val ctx = registeredReceiverContext ?: return
+            registeredReceiverContext = null
+            try {
+                ctx.unregisterReceiver(mMsgReceive)
+            } catch (e: Exception) {
+                LogUtil.d(AppConfig.TAG, "Broadcast receiver already unregistered or not registered")
+            }
+        }
+    }
+
+    private fun startNetworkMonitor(service: Service, ownerSeq: Long) {
         stopNetworkMonitor()
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
         val connectivity = service.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
@@ -363,18 +533,22 @@ object CoreServiceManager {
             },
             claimHandover = { askedBy ->
                 synchronized(coreLifecycleLock) {
-                    ReloadOutcome.handoverReloads(
-                        askedBy = askedBy,
-                        current = networkMonitor,
-                        coreRunning = coreController.isRunning,
-                        reloading = isReloading
-                    ).also { claimed ->
-                        if (claimed) isReloading = true
+                    if (sessionSeq.get() != ownerSeq || stoppedDuringReload) {
+                        false
+                    } else {
+                        ReloadOutcome.handoverReloads(
+                            askedBy = askedBy,
+                            current = networkMonitor,
+                            coreRunning = coreControllerDelegate.isInitialized() && coreController.isRunning,
+                            reloading = isReloading
+                        ).also { claimed ->
+                            if (claimed) isReloading = true
+                        }
                     }
                 }
             },
             onHandover = { askedBy ->
-                reloadCoreOnHandover(askedBy)
+                reloadCoreOnHandover(askedBy, ownerSeq)
             },
             describe = {
                 "mode=${MmkvManager.decodeSettingsString(AppConfig.PREF_MODE) ?: AppConfig.VPN}, guid=${MmkvManager.getSelectServer()}"
@@ -469,8 +643,15 @@ object CoreServiceManager {
         return serviceControl?.get()?.getService()
     }
 
+    private fun isScreenInteractive(context: Context): Boolean {
+        return runCatching {
+            (context.getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive ?: true
+        }.getOrDefault(true)
+    }
+
     private fun measureV2rayDelay(requestId: String = "") {
         val currentService = getService() ?: return
+        val expectedSeq = sessionSeq.get()
         if (!isRunning()) {
             if (requestId.isNotEmpty()) {
                 MessageHelper.sendMsg2UI(
@@ -496,16 +677,22 @@ object CoreServiceManager {
                 LogUtil.e(AppConfig.TAG, "Failed to measure delay with primary URL", e)
                 errorStr = e.message ?: "empty message"
             }
-            if (time == -1L) {
+            if (time == -1L && sessionSeq.get() == expectedSeq && isRunning()) {
                 if (requestId.startsWith("verify_")) {
                     delay(250L)
                 }
-                try {
-                    time = coreController.measureDelay(SettingsManager.getDelayTestUrl(true))
-                } catch (e: Exception) {
-                    LogUtil.e(AppConfig.TAG, "Failed to measure delay with alternative URL", e)
-                    errorStr = e.message ?: "empty message"
+                if (sessionSeq.get() == expectedSeq && isRunning()) {
+                    try {
+                        time = coreController.measureDelay(SettingsManager.getDelayTestUrl(true))
+                    } catch (e: Exception) {
+                        LogUtil.e(AppConfig.TAG, "Failed to measure delay with alternative URL", e)
+                        errorStr = e.message ?: "empty message"
+                    }
                 }
+            }
+
+            if (sessionSeq.get() != expectedSeq || !isRunning()) {
+                return@launch
             }
 
             val result = if (time >= 0) {
@@ -523,6 +710,7 @@ object CoreServiceManager {
             )
 
             if (time >= 0 &&
+                sessionSeq.get() == expectedSeq &&
                 TunnelProbePolicy.shouldFetchRemoteIpInfo(
                     requestId = requestId,
                     coreRunning = isRunning(),
@@ -531,13 +719,15 @@ object CoreServiceManager {
                 )
             ) {
                 SpeedtestManager.getRemoteIPInfo()?.let { ip ->
-                    MessageHelper.sendMsg2UI(
-                        service,
-                        AppConfig.MSG_MEASURE_DELAY_RESULT,
-                        "$result\n$ip",
-                        requestId,
-                        delayMs = time,
-                    )
+                    if (sessionSeq.get() == expectedSeq && isRunning()) {
+                        MessageHelper.sendMsg2UI(
+                            service,
+                            AppConfig.MSG_MEASURE_DELAY_RESULT,
+                            "$result\n$ip",
+                            requestId,
+                            delayMs = time,
+                        )
+                    }
                 }
             }
         }
@@ -578,11 +768,20 @@ object CoreServiceManager {
                                 service.getString(R.string.aether_core_connecting)
                             )
                         } else {
-                            MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_RUNNING, "")
+                            val daemonStartMs = getSessionStartTimeMs()
+                            MessageHelper.sendMsg2UI(
+                                service,
+                                AppConfig.MSG_STATE_RUNNING,
+                                "",
+                                sessionStartMs = daemonStartMs,
+                            )
+                            if (isScreenInteractive(service)) {
+                                NotificationManager.onScreenOn(currentConfig)
+                            }
                             MessageHelper.sendMsg2UI(
                                 service,
                                 AppConfig.MSG_TRAFFIC_STATS,
-                                NotificationManager.currentTrafficSnapshot(getSessionStartTimeMs())
+                                NotificationManager.currentTrafficSnapshot(daemonStartMs)
                             )
                         }
                     } else {
@@ -604,8 +803,7 @@ object CoreServiceManager {
 
                 AppConfig.MSG_STATE_RESTART -> {
                     LogUtil.i(AppConfig.TAG, "Restart Service")
-                    serviceControl.stopService()
-                    serviceControl.startService()
+                    serviceControl.restartService()
                     if (isOrderedBroadcast) {
                         resultCode = Activity.RESULT_OK
                     }
@@ -632,8 +830,7 @@ object CoreServiceManager {
 
                 Intent.ACTION_SCREEN_ON -> {
                     LogUtil.i(AppConfig.TAG, "SCREEN_ON, resuming notification UI updates")
-                    NotificationManager.onScreenOn()
-                    NotificationManager.startSpeedNotification(currentConfig)
+                    NotificationManager.onScreenOn(currentConfig)
                 }
             }
         }

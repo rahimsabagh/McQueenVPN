@@ -10,7 +10,6 @@ import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.extension.isComplexType
 import com.v2ray.ang.extension.toast
-import com.v2ray.ang.extension.toastError
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.SettingsManager
 import com.v2ray.ang.helper.MessageHelper
@@ -101,8 +100,8 @@ object LauncherManager {
         SettingsManager.refreshRuntimeSocksPort()
 
         if (config.insecure == true && config.pinnedCA256.isNullOrEmpty()) {
-            context.toastError(R.string.toast_allow_insecure_deprecated)
-            Utils.setClipboard(context, context.getString(R.string.toast_allow_insecure_deprecated))
+            LogUtil.e(AppConfig.TAG, "LauncherManager: Blocked insecure TLS profile without certificate pin, guid=$guid")
+            error(context.getString(R.string.toast_allow_insecure_deprecated))
         }
 
         if (MmkvManager.decodeSettingsBool(AppConfig.PREF_PROXY_SHARING)) {

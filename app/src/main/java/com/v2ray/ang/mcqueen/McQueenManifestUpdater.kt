@@ -77,19 +77,29 @@ object McQueenManifestUpdater {
         }
     }
 
+    internal fun shouldBroadcastManifestChange(outcome: ManifestSyncOutcome.Success): Boolean =
+        !outcome.fromCache
+
     class RefreshWorker(
         context: Context,
         params: WorkerParameters,
     ) : CoroutineWorker(context, params) {
 
         override suspend fun doWork(): Result {
-            return when (val outcome = McQueenServerRepository().syncFromGitHub(applicationContext)) {
+            return when (val outcome = sharedRepository.syncFromGitHub(applicationContext)) {
                 is ManifestSyncOutcome.Success -> {
-                    LogUtil.i(
-                        AppConfig.TAG,
-                        "McQueenManifestUpdater: refreshed ${outcome.manifest.countries.size} countries"
-                    )
-                    MessageHelper.sendMsg2UI(applicationContext, AppConfig.MSG_SERVERS_CHANGED, "")
+                    if (shouldBroadcastManifestChange(outcome)) {
+                        LogUtil.i(
+                            AppConfig.TAG,
+                            "McQueenManifestUpdater: refreshed ${outcome.manifest.countries.size} countries"
+                        )
+                        MessageHelper.sendMsg2UI(applicationContext, AppConfig.MSG_SERVERS_CHANGED, "")
+                    } else {
+                        LogUtil.i(
+                            AppConfig.TAG,
+                            "McQueenManifestUpdater: manifest unchanged (304 Not Modified)"
+                        )
+                    }
                     Result.success()
                 }
 
@@ -103,4 +113,6 @@ object McQueenManifestUpdater {
             }
         }
     }
+
+    private val sharedRepository: McQueenServerRepository by lazy { McQueenServerRepository() }
 }

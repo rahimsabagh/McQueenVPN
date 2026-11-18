@@ -17,14 +17,14 @@ android {
         val configuredVersionCode = (project.findProperty("mcqueenVersionCode") as? String)
             ?.trim()
             ?.toIntOrNull()
-            ?: 762
+            ?: 764
         val configuredVersionName = ((project.findProperty("mcqueenVersionName") as? String)
             ?: (project.findProperty("pattngVersion") as? String))
             ?.trim()
             ?.removePrefix("v")
             ?.removePrefix("V")
             ?.takeIf { it.isNotEmpty() && it.first().isDigit() }
-            ?: "1.0.0-beta.2"
+            ?: "1.0.0-beta.4"
         versionCode = configuredVersionCode
         versionName = configuredVersionName
         buildConfigField("String", "DISTRIBUTION", "\"Play Store\"")
@@ -71,7 +71,8 @@ android {
         }
         release {
             signingConfig = signingConfigs.getByName("release")
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -142,9 +143,31 @@ android {
         }
     }
 
+    val includeX86_64 = (project.findProperty("includeX86_64") as? String)?.toBoolean() == true
+    val productionAbis = if (includeX86_64) {
+        listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    } else {
+        listOf("arm64-v8a", "armeabi-v7a")
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include(*productionAbis.toTypedArray())
+            isUniversalApk = true
+        }
+    }
+
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            excludes += buildList {
+                add("**/x86/**")
+                if (!includeX86_64) {
+                    add("**/x86_64/**")
+                }
+            }
         }
     }
 
@@ -224,15 +247,21 @@ dependencies {
     coreLibraryDesugaring(libs.desugar.jdk.libs)
 }
 
+val includeX86_64ForStaging = (project.findProperty("includeX86_64") as? String)?.toBoolean() == true
 val ensureLibv2rayAar = tasks.register("ensureLibv2rayAar") {
     val libsDir = layout.projectDirectory.dir("libs").asFile
     val aarFile = File(libsDir, "libv2ray.aar")
-    val requiredAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    val requiredAbis = if (includeX86_64ForStaging) {
+        listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    } else {
+        listOf("arm64-v8a", "armeabi-v7a")
+    }
     val requiredNativeLibs = listOf(
         "libaether.so",
         "libpsiphon-tunnel-core.so",
         "liblyrebird.so",
-        "libhev-socks5-tunnel.so"
+        "libhev-socks5-tunnel.so",
+        "libhevsockstun.so"
     )
     val assetsDir = layout.projectDirectory.dir("src/main/assets").asFile
     val bundledServersJson = File(assetsDir, "servers.json")

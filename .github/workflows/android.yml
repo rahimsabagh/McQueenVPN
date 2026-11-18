@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release version tag (e.g. v1.0.0-beta.2)"
+        description: "Release version tag (e.g. v1.0.0-beta.4)"
         required: false
-        default: "v1.0.0-beta.2"
+        default: "v1.0.0-beta.4"
         type: string
       publish_release:
-        description: "Publish signed APK and AAB to GitHub Releases"
+        description: "Publish signed APK and AAB to GitHub Releases (requires release signing secrets)"
         required: false
-        default: true
+        default: false
         type: boolean
   push:
     branches:
@@ -36,7 +36,7 @@ jobs:
     env:
       GO_VERSION: "1.24"
       NDK_VERSION: "27.2.12479018"
-      RELEASE_TAG: ${{ (inputs.release_tag != '' && inputs.release_tag) || (github.ref_type == 'tag' && github.ref_name) || 'v1.0.0-beta.2' }}
+      RELEASE_TAG: ${{ (inputs.release_tag != '' && inputs.release_tag) || (github.ref_type == 'tag' && github.ref_name) || 'v1.0.0-beta.4' }}
 
     steps:
       - name: Checkout repository
@@ -67,7 +67,7 @@ jobs:
         if: hashFiles('aether/aether/Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi
 
       - name: Set up Android SDK and NDK
         run: |
@@ -105,108 +105,189 @@ jobs:
         run: |
           gradle --no-daemon -PmcqueenVersionName="${RELEASE_TAG}" :app:testDebugUnitTest
 
-      - name: Prepare Release Keystore & Environment Variables
-        id: signing
+      - name: Build Debug APKs (and Signed Release APKs/AAB when signing credentials exist)
+        id: build_apks
         env:
           KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 || secrets.APP_KEYSTORE_BASE64 }}
-          CONFIGURED_STORE_FILE: ${{ secrets.RELEASE_STORE_FILE }}
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || secrets.APP_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.APP_KEYSTORE_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.APP_KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || secrets.APP_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.APP_KEYSTORE_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.APP_KEYSTORE_PASSWORD }}
+          PUBLISH_REQUESTED: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) || startsWith(github.ref, 'refs/tags/') }}
         run: |
-          umask 077
-          store_path="${GITHUB_WORKSPACE}/release.jks"
-          if [[ -n "$KEYSTORE_BASE64" ]]; then
-            printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$store_path"
-            cp "$store_path" "$RUNNER_TEMP/release.jks"
-          fi
-
-          if [[ -n "$CONFIGURED_STORE_FILE" ]]; then
-            # Ensure target path exists if relative like ../release.jks
-            resolved_dir="$(dirname "${GITHUB_WORKSPACE}/app/${CONFIGURED_STORE_FILE}")"
-            mkdir -p "$resolved_dir"
-            if [[ -f "$store_path" && ! -f "${GITHUB_WORKSPACE}/app/${CONFIGURED_STORE_FILE}" ]]; then
-              cp "$store_path" "${GITHUB_WORKSPACE}/app/${CONFIGURED_STORE_FILE}" || true
-            fi
-            effective_store_file="$CONFIGURED_STORE_FILE"
-          else
-            effective_store_file="../release.jks"
-          fi
-
-          if [[ -f "$store_path" && -n "$RELEASE_STORE_PASSWORD" && -n "$RELEASE_KEY_ALIAS" && -n "$RELEASE_KEY_PASSWORD" ]]; then
-            echo "has_release_signing=true" >> "$GITHUB_OUTPUT"
-            echo "RELEASE_STORE_FILE=$effective_store_file" >> "$GITHUB_ENV"
-          else
-            echo "has_release_signing=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build and Sign Release APK & AAB
-        if: steps.signing.outputs.has_release_signing == 'true'
-        env:
-          RELEASE_STORE_FILE: ${{ env.RELEASE_STORE_FILE }}
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || secrets.APP_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.APP_KEYSTORE_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.APP_KEY_PASSWORD }}
-        run: |
-          gradle --no-daemon \
-            -PmcqueenVersionName="${RELEASE_TAG}" \
-            :app:assembleRelease \
-            :app:bundleRelease
-
-          mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk "dist/app-release.apk"
-          cp app/build/outputs/apk/release/app-release.apk "dist/McQueenVPN-${RELEASE_TAG}.apk"
-          cp app/build/outputs/bundle/release/app-release.aab "dist/McQueenVPN-${RELEASE_TAG}.aab"
-
-          jarsigner -verify "dist/app-release.apk"
-          jarsigner -verify "dist/McQueenVPN-${RELEASE_TAG}.aab"
-
-      - name: Fallback Debug Build (when release signing secrets are not set)
-        if: steps.signing.outputs.has_release_signing != 'true'
-        run: |
-          echo "::warning::Release signing secrets (RELEASE_KEYSTORE_BASE64, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD) are not configured. Building debug-signed APK instead."
+          mkdir -p dist/debug
           gradle --no-daemon -PmcqueenVersionName="${RELEASE_TAG}" :app:assembleDebug
-          mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/McQueenVPN-${RELEASE_TAG}-debug.apk"
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/app-release.apk"
 
-      - name: Verify Native Libraries & Generate Checksums
-        run: |
-          apk="dist/app-release.apk"
-          entries="$(unzip -Z1 "$apk" | grep '^lib/' || true)"
-          for abi in arm64-v8a armeabi-v7a x86_64; do
-            for lib in libaether.so libpsiphon-tunnel-core.so liblyrebird.so libhev-socks5-tunnel.so; do
-              if ! echo "$entries" | grep -qx "lib/$abi/$lib"; then
-                echo "::error::$(basename "$apk") is missing lib/$abi/$lib"
+          for abi in arm64-v8a armeabi-v7a universal; do
+            src="app/build/outputs/apk/debug/app-${abi}-debug.apk"
+            if [[ ! -f "$src" ]]; then
+              echo "::error::Expected debug split APK missing: $src"
+              exit 1
+            fi
+            cp "$src" "dist/debug/McQueenVPN-${RELEASE_TAG}-${abi}-debug.apk"
+          done
+
+          any_secret_set=false
+          if [[ -n "$KEYSTORE_BASE64" || -n "$STORE_PASSWORD" || -n "$KEY_ALIAS" || -n "$KEY_PASSWORD" ]]; then
+            any_secret_set=true
+          fi
+
+          missing=()
+          [[ -n "$KEYSTORE_BASE64" ]] || missing+=(RELEASE_KEYSTORE_BASE64)
+          [[ -n "$STORE_PASSWORD" ]] || missing+=(RELEASE_STORE_PASSWORD)
+          [[ -n "$KEY_ALIAS" ]] || missing+=(RELEASE_KEY_ALIAS)
+          [[ -n "$KEY_PASSWORD" ]] || missing+=(RELEASE_KEY_PASSWORD)
+
+          if (( ${#missing[@]} > 0 )); then
+            if [[ "$PUBLISH_REQUESTED" == "true" || "$any_secret_set" == "true" ]]; then
+              printf '::error::Release signing failed — missing required GitHub secret(s): %s\n' "${missing[*]}"
+              exit 1
+            fi
+            echo "::notice::Release signing secrets not configured; produced debug-only artifacts under dist/debug/ (no release artifacts generated)."
+            echo "signed_release=false" >> "$GITHUB_OUTPUT"
+          else
+            mkdir -p dist/release
+            umask 077
+            keystore_path="$RUNNER_TEMP/release.jks"
+            printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$keystore_path"
+            chmod 600 "$keystore_path"
+            test -s "$keystore_path"
+
+            RELEASE_STORE_FILE="$keystore_path" \
+            RELEASE_STORE_PASSWORD="$STORE_PASSWORD" \
+            RELEASE_KEY_ALIAS="$KEY_ALIAS" \
+            RELEASE_KEY_PASSWORD="$KEY_PASSWORD" \
+              gradle --no-daemon -PmcqueenVersionName="${RELEASE_TAG}" :app:assembleRelease :app:bundleRelease
+
+            for abi in arm64-v8a armeabi-v7a universal; do
+              rel_src="app/build/outputs/apk/release/app-${abi}-release.apk"
+              if [[ ! -f "$rel_src" ]]; then
+                echo "::error::Expected signed release split APK missing: $rel_src"
                 exit 1
               fi
+              "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$rel_src"
+              jarsigner -verify -verbose -certs "$rel_src"
+              cp "$rel_src" "dist/release/McQueenVPN-${RELEASE_TAG}-${abi}-release.apk"
             done
-          done
+
+            aab_src="app/build/outputs/bundle/release/app-release.aab"
+            if [[ ! -f "$aab_src" ]]; then
+              echo "::error::Expected signed release AAB missing: $aab_src"
+              exit 1
+            fi
+            jarsigner -verify -verbose -certs "$aab_src"
+            cert_sha256="$(keytool -printcert -jarfile "$aab_src" | awk -F': ' '/SHA256:/ {gsub(":", "", $2); print toupper($2); exit}')"
+            if [[ -z "$cert_sha256" ]]; then
+              echo "::error::Unable to extract SHA-256 certificate fingerprint from $aab_src"
+              exit 1
+            fi
+            echo "Release signing certificate SHA-256: $cert_sha256" >> "$GITHUB_STEP_SUMMARY"
+            cp "$aab_src" "dist/release/McQueenVPN-${RELEASE_TAG}-release.aab"
+            echo "signed_release=true" >> "$GITHUB_OUTPUT"
+          fi
 
           (
             cd dist
-            sha256sum * | tee SHA256SUMS.txt
+            find . -type f \( -name '*.apk' -o -name '*.aab' \) -print0 | sort -z | xargs -0 sha256sum | tee SHA256SUMS.txt
           )
 
-      - name: Clean up temporary keystore files
+      - name: Clean up temporary release keystore
         if: always()
         run: |
-          rm -f "${GITHUB_WORKSPACE}/release.jks" "$RUNNER_TEMP/release.jks"
+          rm -f "$RUNNER_TEMP/release.jks"
 
-      - name: Upload Release Artifacts
+      - name: Validate native library inventory, 16 KB alignment, and package metadata per ABI
+        run: |
+          ZIPALIGN="$ANDROID_HOME/build-tools/36.0.0/zipalign"
+          AAPT2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
+          expected_pkg="com.aistudio.mcqueenvpn.rmqvpn"
+          expected_vcode="764"
+          expected_vname="${RELEASE_TAG#v}"
+          expected_vname="${expected_vname#V}"
+
+          required_libs=(
+            libaether.so
+            libgojni.so
+            libpsiphon-tunnel-core.so
+            liblyrebird.so
+            libhev-socks5-tunnel.so
+            libhevsockstun.so
+            libmmkv.so
+            libandroidx.graphics.path.so
+          )
+
+          check_apk_abi() {
+            local apk="$1"
+            local expected_abis=("${@:2}")
+            local entries
+            entries="$(unzip -Z1 "$apk" | grep '^lib/' || true)"
+            if echo "$entries" | grep -qE '^lib/(x86|x86_64)/'; then
+              echo "::error::$apk contains excluded non-ARM ABI entries"
+              exit 1
+            fi
+            for abi in "${expected_abis[@]}"; do
+              for lib in "${required_libs[@]}"; do
+                if ! echo "$entries" | grep -qx "lib/$abi/$lib"; then
+                  echo "::error::$apk is missing lib/$abi/$lib"
+                  exit 1
+                fi
+              done
+            done
+            "$ZIPALIGN" -c -P 16 -v 4 "$apk" >/dev/null
+            local badging
+            badging="$("$AAPT2" dump badging "$apk" | head -n 1)"
+            echo "$badging" | grep -Fq "name='${expected_pkg}'" || {
+              echo "::error::$apk has unexpected package name: $badging"
+              exit 1
+            }
+            echo "$badging" | grep -Fq "versionCode='${expected_vcode}'" || {
+              echo "::error::$apk has unexpected versionCode: $badging"
+              exit 1
+            }
+            echo "$badging" | grep -Fq "versionName='${expected_vname}'" || {
+              echo "::error::$apk has unexpected versionName: $badging"
+              exit 1
+            }
+          }
+
+          check_apk_abi "dist/debug/McQueenVPN-${RELEASE_TAG}-arm64-v8a-debug.apk" "arm64-v8a"
+          check_apk_abi "dist/debug/McQueenVPN-${RELEASE_TAG}-armeabi-v7a-debug.apk" "armeabi-v7a"
+          check_apk_abi "dist/debug/McQueenVPN-${RELEASE_TAG}-universal-debug.apk" "arm64-v8a" "armeabi-v7a"
+
+          if [[ "${{ steps.build_apks.outputs.signed_release }}" == "true" ]]; then
+            check_apk_abi "dist/release/McQueenVPN-${RELEASE_TAG}-arm64-v8a-release.apk" "arm64-v8a"
+            check_apk_abi "dist/release/McQueenVPN-${RELEASE_TAG}-armeabi-v7a-release.apk" "armeabi-v7a"
+            check_apk_abi "dist/release/McQueenVPN-${RELEASE_TAG}-universal-release.apk" "arm64-v8a" "armeabi-v7a"
+          fi
+
+      - name: Upload debug build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: McQueenVPN-${{ env.RELEASE_TAG }}
-          path: dist/*
+          name: McQueenVPN-${{ env.RELEASE_TAG }}-debug
+          path: |
+            dist/debug/*
+            dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish GitHub Release
-        if: (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) || startsWith(github.ref, 'refs/tags/')
+      - name: Upload signed release build artifacts
+        if: steps.build_apks.outputs.signed_release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: McQueenVPN-${{ env.RELEASE_TAG }}-release
+          path: |
+            dist/release/*
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish Signed GitHub Release
+        if: ((github.event_name == 'workflow_dispatch' && inputs.publish_release == true) || startsWith(github.ref, 'refs/tags/')) && steps.build_apks.outputs.signed_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: McQueen VPN ${{ env.RELEASE_TAG }}
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           generate_release_notes: true
-          files: dist/*
+          files: |
+            dist/release/*
+            dist/SHA256SUMS.txt

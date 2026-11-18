@@ -7,15 +7,22 @@ import androidx.work.Configuration
 import androidx.work.WorkManager
 import com.v2ray.ang.AppConfig.ANG_PACKAGE
 import com.v2ray.ang.core.AetherCoreManager
+import com.v2ray.ang.core.AppProcessInitializer
 import com.v2ray.ang.handler.AppLocaleManager
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.SettingsManager
 import com.v2ray.ang.ui.compose.ThemeManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
-class AngApplication : Application() {
+class AngApplication : Application(), Configuration.Provider {
     companion object {
         lateinit var application: AngApplication
     }
+
+    private val appInitScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Attaches the base context to the application.
@@ -26,30 +33,49 @@ class AngApplication : Application() {
         application = this
     }
 
-    private val workManagerConfiguration: Configuration = Configuration.Builder()
-        .setDefaultProcessName("${ANG_PACKAGE}:bg")
-        .build()
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder()
+            .setDefaultProcessName("${ANG_PACKAGE}:bg")
+            .build()
 
     /**
-     * Initializes the application.
+     * Initializes the application according to the active process role.
      */
     override fun onCreate() {
         super.onCreate()
 
-        MmkvManager.initialize(this)
+        val processName = AppProcessInitializer.currentProcessName(packageName)
+        val role = AppProcessInitializer.resolveProcessRole(processName, packageName)
+        val plan = AppProcessInitializer.planFor(role)
 
-        AppLocaleManager.initialize(this)
+        if (plan.initializeMmkv) {
+            MmkvManager.initialize(this)
+        }
 
-        // Initialize WorkManager with the custom configuration
-        WorkManager.initialize(this, workManagerConfiguration)
+        if (plan.initializeAppLocale) {
+            AppLocaleManager.initialize(this)
+        }
 
-        // Ensure critical preference defaults are present in MMKV early
-        SettingsManager.initApp(this)
+        if (plan.eagerWorkManagerInit && !WorkManager.isInitialized()) {
+            WorkManager.initialize(this, workManagerConfiguration)
+        }
 
-        // PattNG: the Aether cores of this process listen on the port of the settings.
-        AetherCoreManager.listenPortSource = SettingsManager::getAetherListenPort
+        if (plan.eagerSettingsInit) {
+            SettingsManager.initApp(this)
+        } else if (plan.asyncUiSettingsInit) {
+            appInitScope.launch {
+                SettingsManager.initApp(this@AngApplication)
+            }
+        }
 
-        // Initialize theme state from MMKV
-        ThemeManager.refresh()
+        if (plan.wireAetherListenPort) {
+            // PattNG: the Aether cores of this process listen on the port of the settings.
+            AetherCoreManager.listenPortSource = SettingsManager::getAetherListenPort
+        }
+
+        if (plan.refreshTheme) {
+            // Initialize theme state from MMKV
+            ThemeManager.refresh()
+        }
     }
 }
